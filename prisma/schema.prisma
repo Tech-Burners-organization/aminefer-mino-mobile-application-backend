@@ -334,7 +334,7 @@ model EmergencyContact {
   id          String @id @default(uuid())
   userId      String
   name        String
-  countryCode String
+  countryCode String?
   phoneNumber String
 
   user        User   @relation(fields: [userId], references: [id], onDelete: Cascade)
