@@ -54,7 +54,6 @@ const userValidationSchema = z.object({
 const addEmergencyContactSchema = z.object({
   body: z.object({
     name: z.string().min(1, { message: 'Name is required' }),
-    countryCode: z.string().min(1, { message: 'Country code is required' }),
     phoneNumber: z.string().regex(/^[0-9]{6,15}$/, {
       message: 'Phone number must contain 6 to 15 digits',
     }),
