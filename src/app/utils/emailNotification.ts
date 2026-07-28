@@ -32,6 +32,9 @@ const otpSendEmail = async ({
   otp,
   expiredAt,
 }: OtpSendEmailParams): Promise<void> => {
+
+  const otpExpiryMinutes = parseInt(config.otp_expire_time as string) || 2;
+  
   const emailBody = `
   <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden;">
 
@@ -77,9 +80,9 @@ const otpSendEmail = async ({
         </p>
       </div>
 
+
       <p style="font-size: 14px; color: #666;">
-        This OTP will expire on:<br />
-        <strong>${expiredAt.toLocaleString()}</strong>
+        This OTP will expire in <strong>${otpExpiryMinutes} minute${otpExpiryMinutes === 1 ? '' : 's'}</strong>.
       </p>
 
       <p style="margin-top: 24px; font-size: 14px;">

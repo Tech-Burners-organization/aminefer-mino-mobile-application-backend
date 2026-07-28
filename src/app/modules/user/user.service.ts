@@ -83,6 +83,7 @@ const createUserToken = async (payload: TUserCreate) => {
     });
   }
 
+
   process.nextTick(async () => {
     await otpSendEmail({ sentTo: email, subject: 'Your OTP for email verification', name: name || 'Customer', otp, expiredAt });
   });
