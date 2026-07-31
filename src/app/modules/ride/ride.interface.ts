@@ -68,6 +68,11 @@ export interface IParcelDetails {
 }
 
 // ── Create-ride payload ───────────────────────────────────────────────────────
+// NOTE: fare fields (estimatedFare/totalFare/driverEarning/adminCommission) are
+// intentionally NOT part of this payload — the backend derives them from the
+// live Fare table via ride.pricing.ts#calculateRideFare(). Never accept them
+// from the client. distanceKm/durationMin are still client-supplied (they come
+// from the client's own Maps/Directions SDK, which the backend doesn't have).
 export interface TRideCreate {
   country:        string;
   passengerId:    string;
@@ -85,10 +90,6 @@ export interface TRideCreate {
   paymentMethod:  PaymentMethod;
   distanceKm:     number;
   durationMin:    number;
-  estimatedFare:  number;
-  totalFare:      number;
-  driverEarning:  number;
-  adminCommission: number;
 
   pickupType:     PickupType;
   scheduledAt?:   Date | null;

@@ -46,6 +46,7 @@ export const SocketEvents = {
   DRIVER_GO_OFFLINE: 'driver:goOffline',
   UPDATE_LOCATION: 'driver:updateLocation',
   ACCEPT_RIDE: 'accept_ride',
+  ARRIVED_PICKUP: 'arrived_pickup',
   START_RIDE: 'start_ride',
   END_RIDE: 'end_ride',
   ARRIVED_DROPOFF: 'arrived_dropoff',
@@ -60,6 +61,7 @@ export const SocketEvents = {
   // ── Server → Client: system events ──────────────────────────────────────
   RIDE_REQUESTED: 'ride_requested',
   RIDE_ACCEPTED: 'ride_accepted',
+  RIDE_ARRIVED_PICKUP: 'ride_arrived_pickup',
   RIDE_STARTED: 'ride_started',
   RIDE_ENDED: 'ride_ended',
   RIDE_CONFIRM_DROPOFF: 'ride_confirm_dropoff',
@@ -113,6 +115,10 @@ export interface DriverOnlinePayload {
 }
 
 export interface AcceptRidePayload {
+  rideId: string;
+}
+
+export interface ArrivedPickupPayload {
   rideId: string;
 }
 

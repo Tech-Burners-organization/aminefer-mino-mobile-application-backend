@@ -453,6 +453,16 @@ model Ride {
 
   distanceKm    Float @default(0)
   durationMin   Float @default(0)
+
+  // Fare snapshot — captured at ride creation so later Fare config changes
+  // never rewrite the price a passenger actually agreed to.
+  baseFare      Float @default(0)
+  bookingFee    Float @default(0)
+  distanceFare  Float @default(0)
+  waitingCharge Float @default(0)
+  surchargeFare Float @default(0)
+  subtotalFare  Float @default(0)
+
   estimatedFare Float @default(0)
   totalFare     Float @default(0)
   driverEarning Float @default(0)
@@ -466,6 +476,11 @@ model Ride {
   scheduledAt DateTime?
 
   driverAcceptedAt DateTime?
+
+  // Waiting-charge timing — driver-wait window is arrivedPickupAt → startRideAt
+  arrivedPickupAt DateTime?
+  startRideAt     DateTime?
+  waitingTime     Float     @default(0) // minutes, actual elapsed wait
 
   // Passenger review (flattened from embedded ReviewEntry)
   passengerReviewRating   Float?
@@ -484,6 +499,11 @@ model Ride {
 
   stripePaymentIntentId String?
 
+  // Card used for this ride (snapshot — survives the PaymentCard being edited/removed later)
+  paymentCardId String?
+  cardBrand     CardBrand?
+  cardLast4     String?
+
   isDeleted Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -492,6 +512,7 @@ model Ride {
   passenger          User           @relation("PassengerRides", fields: [passengerId], references: [id])
   driver             DriverProfile? @relation("DriverRides", fields: [driverId], references: [id])
   promo              Promo?         @relation(fields: [promoId], references: [id])
+  paymentCard        PaymentCard?   @relation(fields: [paymentCardId], references: [id])
 
   statusHistory      RideStatusHistory[]
   cancellations      RideCancellation[]
@@ -898,7 +919,8 @@ model PaymentCard {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rides Ride[]
 
   @@index([userId, isDeleted])
   @@index([userId, isDefault])

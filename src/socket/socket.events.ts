@@ -29,6 +29,7 @@ import {
 import {
   AcceptRidePayload,
   ApplyPromoPayload,
+  ArrivedPickupPayload,
   CancelRidePayload,
   CompleteRidePayload,
   DriverOnlinePayload,
@@ -369,6 +370,33 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
   );
 
   /**
+   * arrived_pickup
+   */
+  socket.on(
+    SocketEvents.ARRIVED_PICKUP,
+    async (payload: ArrivedPickupPayload, ackFn?: AckFn) => {
+
+      console.log("=================== Arrived pick up ==========>>> ", SocketEvents.ARRIVED_PICKUP, payload)
+      try {
+        if (role !== 'driver' || !driverProfileId) {
+          return sendAck(ackFn, { success: false, error: 'Only drivers can use this event', code: 403 });
+        }
+
+        const data = validate(RideIdSchema, payload, ackFn);
+        if (!data) return;
+
+        await RideService.arrivedPickup(data.rideId, driverProfileId);
+
+        sendAck(ackFn, { success: true, data: { rideId: data.rideId, status: 'ARRIVED_PICKUP' } });
+        logger.info(`[ARRIVED PICKUP] driver=${userId} ride=${data.rideId}`);
+      } catch (err: any) {
+        logger.error(`[${SocketEvents.ARRIVED_PICKUP}] error:`, err);
+        sendAck(ackFn, { success: false, error: err.message ?? 'Failed to mark arrival at pickup', code: 500 });
+      }
+    },
+  );
+
+  /**
    * start_ride
    */
   socket.on(
@@ -527,6 +555,8 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
   socket.on(
     SocketEvents.ARRIVED_DROPOFF,
     async (payload: unknown, ackFn?: AckFn) => {
+
+      console.log("Arrived dropped ==>> hitted", payload)
       try {
         if (role !== 'driver' || !driverProfileId) {
           return sendAck(ackFn, { success: false, error: 'Only drivers can use this event', code: 403 });
@@ -564,6 +594,8 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
   socket.on(
     SocketEvents.CONFIRM_DROPOFF,
     async (payload: unknown, ackFn?: AckFn) => {
+
+      console.log("confirm dropoff hitted =>>> ", payload)
       try {
         if (role !== 'driver' || !driverProfileId) {
           return sendAck(ackFn, { success: false, error: 'Only drivers can confirm dropoff', code: 403 });
@@ -593,11 +625,23 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
               distanceKm:      ride.distanceKm,
               durationMin:     ride.durationMin,
               estimatedFare:   ride.estimatedFare,
+              baseFare: ride.baseFare ?? 0,
+              bookingFee: ride.bookingFee ?? 0,
+              distanceFare: ride.distanceFare ?? 0,
+              surchargeFare: ride.surchargeFare ?? 0,
+              waitingCharge: ride.waitingCharge ?? 0,
+              waitingTime: ride.waitingTime ?? 0,
+              tip: ride.tip ?? 0,
+
+              
               totalFare:       ride.totalFare       ?? 0,
               driverEarning:   ride.driverEarning   ?? 0,
               adminCommission: ride.adminCommission  ?? 0,
               promoDiscount:   ride.promoDiscount    ?? 0,
               paymentMethod:   ride.paymentMethod,
+              paymentCardId: ride.paymentCardId ?? null,
+              cardBrand:     ride.cardBrand ?? null,
+              cardLast4:     ride.cardLast4 ?? null,
               changedAt:       new Date(),
               serviceType:     ride.serviceType,
               pickupType:      ride.pickupType,

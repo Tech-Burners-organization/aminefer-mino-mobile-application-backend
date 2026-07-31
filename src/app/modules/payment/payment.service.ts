@@ -478,34 +478,40 @@ const adminGetAllPayments = async (query: Record<string, unknown>) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// captureRidePayment — called from confirmDropoff for CARD rides.
-// Captures the previously authorized PaymentIntent for the exact totalFare,
-// then marks the ride COMPLETED + PAID and credits the driver wallet.
+// captureRidePayment — called from payRide() once the passenger explicitly
+// confirms (with an optional tip). Captures the previously authorized
+// PaymentIntent for totalFare + tip, then marks the ride COMPLETED + PAID
+// and credits the driver wallet. Commission is charged on the fare only —
+// the tip passes through to the driver in full.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const captureRidePayment = async (rideId: string): Promise<void> => {
+const captureRidePayment = async (rideId: string, tip = 0): Promise<void> => {
   const ride = await prisma.ride.findUnique({ where: { id: rideId, isDeleted: false } });
   if (!ride)                       throw new AppError(httpStatus.NOT_FOUND,   'Ride not found');
   if (!ride.stripePaymentIntentId) throw new AppError(httpStatus.BAD_REQUEST, 'No Stripe PaymentIntent on this ride');
   if (ride.paymentStatus === 'PAID') return; // idempotent — already captured
 
-  const totalFare       = ride.totalFare ?? 0;
-  const captureAmount   = Math.round(totalFare * 100); // cents
+  const tipAmount     = Math.max(0, Math.round(tip));
+  const fareOnly      = ride.totalFare ?? 0;
+  const totalFare     = fareOnly + tipAmount;
+  const captureAmount = Math.round(totalFare * 100); // cents
 
   const fareConfig      = await prisma.fare.findFirst({ where: { country: ride.country, isActive: true } });
   const commissionPct   = fareConfig?.platformCommissionPercentage ?? 0;
-  const adminCommission = Math.round((totalFare * commissionPct) / 100);
+  const adminCommission = Math.round((fareOnly * commissionPct) / 100);
   const driverEarning   = Math.round(totalFare - adminCommission);
 
-  // Capture exact fare (always ≤ authorized amount which was totalFare × 1.5)
+  // Capture fare + tip (always ≤ authorized amount which was fareOnly × 1.5)
   await stripeClient.paymentIntents.capture(ride.stripePaymentIntentId, {
     amount_to_capture: captureAmount,
   });
 
   // Mark ride COMPLETED + PAID
-  const saved = await prisma.ride.update({
+  const saved: any = await prisma.ride.update({
     where: { id: rideId },
     data:  {
+      tip:             tipAmount,
+      totalFare,
       paymentStatus:   'PAID',
       status:          'COMPLETED',
       adminCommission,
@@ -553,7 +559,7 @@ const captureRidePayment = async (rideId: string): Promise<void> => {
         driverEarning,
         adminCommission,
         promoDiscount:         ride.promoDiscount,
-        tip:                   ride.tip,
+        tip:                   tipAmount,
         paymentMethod:         'CARD',
         stripePaymentIntentId: ride.stripePaymentIntentId!,
       }).catch((err) => logger.warn('captureRidePayment: payment record failed:', err));
@@ -600,6 +606,7 @@ const captureRidePayment = async (rideId: string): Promise<void> => {
         pickupType:      saved.pickupType,
       };
       emitToRideRoom(rideId, SocketEvents.RIDE_COMPLETED, completedPayload);
+      emitToDriver(saved.driverId, SocketEvents.RIDE_STATUS_UPDATED, { rideId, status: 'PAYMENT_COMPLETED', changedAt: new Date() });
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_STATUS_UPDATED, { rideId, status: 'COMPLETED', changedAt: new Date() });
       if (ride.driverId) setDriverOnRide(ride.driverId, false);
     }

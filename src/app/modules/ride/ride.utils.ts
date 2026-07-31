@@ -1,4 +1,5 @@
 import prisma from '../../config/prisma';
+import { getActiveFare, computeFareBreakdown, computeWaitingCharge } from './ride.pricing';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -120,51 +121,30 @@ export const estimateRideOptions = async ({
 
   distanceKm = Number(distanceKm);
 
-  const fare = await prisma.fare.findFirst({
-    where: { country: country.toUpperCase() || "BANGLADESH", isActive: true },
-  });
+  const fare = await getActiveFare(country);
 
-  if (!fare) throw new Error('Fare configuration not found for this country');
-
-  const vehicleConfigs: { vehicleType: TVehicleType; baseFee: number; bookingFee: number; ratePerKm: number; minimumFare: number }[] = [
-    { vehicleType: 'MINO_GO',      baseFee: fare.minoGoBaseFee,     bookingFee: fare.minoGoBookingFee,     ratePerKm: fare.minoGoRatePerKm,     minimumFare: fare.minoGoMinimumFare },
-    { vehicleType: 'MINO_COMFORT', baseFee: fare.minoGoBaseFee,     bookingFee: fare.minoGoBookingFee,     ratePerKm: fare.minoGoRatePerKm,     minimumFare: fare.minoGoMinimumFare },
-    { vehicleType: 'MINO_XL',      baseFee: fare.minoXLBaseFee,     bookingFee: fare.minoXLBookingFee,     ratePerKm: fare.minoXLRatePerKm,     minimumFare: fare.minoXLMinimumFare },
-    { vehicleType: 'MINO_MOTO',    baseFee: fare.minoMotoBaseFee,   bookingFee: fare.minoMotoBookingFee,   ratePerKm: fare.minoMotoRatePerKm,   minimumFare: fare.minoMotoMinimumFare },
-  ];
+  const vehicleTypes: TVehicleType[] = ['MINO_GO', 'MINO_COMFORT', 'MINO_XL', 'MINO_MOTO'];
 
   const pickupResults = await Promise.all(
-    vehicleConfigs.map(({ vehicleType }) =>
+    vehicleTypes.map((vehicleType) =>
       getAveragePickupDistanceKm(pickupLat, pickupLng, vehicleType),
     ),
   );
 
-  return vehicleConfigs.map(({ vehicleType, baseFee, bookingFee, ratePerKm, minimumFare }, i) => {
+  return vehicleTypes.map((vehicleType, i) => {
     const { avgDistanceKm, hasDrivers } = pickupResults[i];
     const speed = AVERAGE_SPEED_KMH[vehicleType];
-
-    let estimatedFare = baseFee + bookingFee + ratePerKm * distanceKm;
-    if (estimatedFare < minimumFare) estimatedFare = minimumFare;
-
-    let totalFare = estimatedFare;
-    if (fare.surchargeEnabled)     totalFare += fare.surchargeValue;
-    if (fare.waitingChargeEnabled) totalFare += fare.waitingChargeRate * fare.waitingChargeGracePeriod;
-
-    const adminCommission = (totalFare * fare.platformCommissionPercentage) / 100;
-    const driverEarning   = totalFare - adminCommission;
+    const breakdown = computeFareBreakdown(fare, vehicleType, distanceKm);
 
     const estimatedArrivalTimeMin = Math.ceil((avgDistanceKm / speed) * 60);
     const estimatedRideTimeMin    = Math.ceil((distanceKm / speed) * 60);
 
     return {
       vehicleType,
-      estimatedFare:          Math.round(estimatedFare),
-      totalFare:              Math.round(totalFare),
-      driverEarning:          Math.round(driverEarning),
-      adminCommission:        Math.round(adminCommission),
+      ...breakdown,
       estimatedArrivalTimeMin,
       estimatedRideTimeMin,
-      isAvailable:            hasDrivers,
+      isAvailable: hasDrivers,
     };
   });
 };
@@ -186,87 +166,57 @@ export const estimateMotoOptions = async ({
 
   distanceKm = Number(distanceKm);
 
-  const fare = await prisma.fare.findFirst({
-    where: { country: country.toUpperCase() || "BANGLADESH", isActive: true },
-  });
-
-  if (!fare) throw new Error('Fare configuration not found for this country');
-
+  const fare = await getActiveFare(country);
   const { avgDistanceKm, hasDrivers } = await getAveragePickupDistanceKm(pickupLat, pickupLng, 'MINO_MOTO');
   const speed = AVERAGE_SPEED_KMH['MINO_MOTO'];
-
-  let estimatedFare = fare.minoMotoBaseFee + fare.minoMotoBookingFee + fare.minoMotoRatePerKm * distanceKm;
-  if (estimatedFare < fare.minoMotoMinimumFare) estimatedFare = fare.minoMotoMinimumFare;
-
-  let totalFare = estimatedFare;
-  if (fare.surchargeEnabled)     totalFare += fare.surchargeValue;
-  if (fare.waitingChargeEnabled) totalFare += fare.waitingChargeRate * fare.waitingChargeGracePeriod;
-
-  const adminCommission = (totalFare * fare.platformCommissionPercentage) / 100;
-  const driverEarning   = totalFare - adminCommission;
+  const breakdown = computeFareBreakdown(fare, 'MINO_MOTO', distanceKm);
 
   return {
-    vehicleType:            'MINO_MOTO' as TVehicleType,
-    estimatedFare:          Math.round(estimatedFare),
-    totalFare:              Math.round(totalFare),
-    driverEarning:          Math.round(driverEarning),
-    adminCommission:        Math.round(adminCommission),
+    vehicleType: 'MINO_MOTO' as TVehicleType,
+    ...breakdown,
     estimatedArrivalTimeMin: Math.ceil((avgDistanceKm / speed) * 60),
     estimatedRideTimeMin:    Math.ceil((distanceKm / speed) * 60),
-    isAvailable:            hasDrivers,
+    isAvailable:             hasDrivers,
   };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Re-calculate fare fields using actual distance at ride end.
- * Returns the updated fare numbers (does not write to DB).
+ * Re-calculate fare fields using actual distance at ride end, folding in the
+ * real waiting charge (arrivedPickupAt → startRideAt) now that both timestamps
+ * exist. Returns the updated fare numbers (does not write to DB).
  */
 export const recalculateFare = async (params: {
-  country:         string;
-  vehicleCategory: string;
+  country:          string;
+  vehicleCategory:  string;
   actualDistanceKm: number;
-  promoDiscount:   number;
+  promoDiscount:    number;
+  arrivedPickupAt?: Date | null;
+  startRideAt?:     Date | null;
 }): Promise<{
   estimatedFare:   number;
   totalFare:       number;
   adminCommission: number;
   driverEarning:   number;
+  waitingTime:     number;
+  waitingCharge:   number;
 }> => {
 
+  const fare      = await getActiveFare(params.country);
+  const breakdown = computeFareBreakdown(fare, params.vehicleCategory, params.actualDistanceKm);
+  const { waitingTime, waitingCharge } = computeWaitingCharge(fare, params.arrivedPickupAt, params.startRideAt);
 
-  const fare = await prisma.fare.findFirst({
-    where: { country: params.country.toUpperCase() || "BANGLADESH", isActive: true },
-  });
-  if (!fare) throw new Error('Fare configuration not found for this country');
-
-  const pricingMap: Record<string, { baseFee: number; bookingFee: number; ratePerKm: number; minimumFare: number }> = {
-    MINO_GO:      { baseFee: fare.minoGoBaseFee,   bookingFee: fare.minoGoBookingFee,   ratePerKm: fare.minoGoRatePerKm,   minimumFare: fare.minoGoMinimumFare },
-    MINO_COMFORT: { baseFee: fare.minoGoBaseFee,   bookingFee: fare.minoGoBookingFee,   ratePerKm: fare.minoGoRatePerKm,   minimumFare: fare.minoGoMinimumFare },
-    MINO_XL:      { baseFee: fare.minoXLBaseFee,   bookingFee: fare.minoXLBookingFee,   ratePerKm: fare.minoXLRatePerKm,   minimumFare: fare.minoXLMinimumFare },
-    MINO_MOTO:    { baseFee: fare.minoMotoBaseFee, bookingFee: fare.minoMotoBookingFee, ratePerKm: fare.minoMotoRatePerKm, minimumFare: fare.minoMotoMinimumFare },
-  };
-  
-  const pricing = pricingMap[params.vehicleCategory] ?? pricingMap['MINO_GO'];
-
-  let estimatedFare = pricing.baseFee + pricing.bookingFee + pricing.ratePerKm * params.actualDistanceKm;
-  if (estimatedFare < pricing.minimumFare) estimatedFare = pricing.minimumFare;
-
-  let totalFare = estimatedFare;
-  if (fare.surchargeEnabled)     totalFare += fare.surchargeValue;
-  if (fare.waitingChargeEnabled) totalFare += fare.waitingChargeRate * fare.waitingChargeGracePeriod;
-
-  totalFare = Math.max(0, totalFare - params.promoDiscount);
-
-  const adminCommission = (totalFare * fare.platformCommissionPercentage) / 100;
+  const totalFare       = Math.max(0, breakdown.totalFare + waitingCharge - params.promoDiscount);
+  const adminCommission = Math.round((totalFare * fare.platformCommissionPercentage) / 100);
   const driverEarning   = totalFare - adminCommission;
 
   return {
-    estimatedFare:   Math.round(estimatedFare),
-    totalFare:       Math.round(totalFare),
-    adminCommission: Math.round(adminCommission),
-    driverEarning:   Math.round(driverEarning),
+    estimatedFare: breakdown.estimatedFare,
+    totalFare,
+    adminCommission,
+    driverEarning,
+    waitingTime,
+    waitingCharge,
   };
-
 };

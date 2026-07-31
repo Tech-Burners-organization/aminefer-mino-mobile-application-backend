@@ -1,4 +1,4 @@
-import { RideStatus, CancellationActor, Prisma, PickupType } from '@prisma/client';
+import { RideStatus, CancellationActor, Prisma, PickupType, ServiceType } from '@prisma/client';
 import prisma from '../../config/prisma';
 import {
   isManagerReady,
@@ -12,6 +12,7 @@ import {
   notifyRideTaken,
 } from '../../../socket/socket.manager';
 import { getDistanceKm, recalculateFare } from './ride.utils';
+import { calculateRideFare, buildFareBreakdown } from './ride.pricing';
 import { scheduleRideBroadcast, cancelScheduledRideBroadcast } from './ride.scheduler';
 import { SocketEvents } from '../../../socket/socket.types';
 import { logger } from '../../utils/logger';
@@ -158,17 +159,31 @@ const createRide = async (payload: any) => {
   const country = payload.country || "BANGLADESH".toUpperCase();
 
   // =====================================================
+  // FARE CALCULATION (backend authority — never trust client-sent fare)
+  // =====================================================
+  // distanceKm/durationMin still come from the client's own Maps/Directions SDK
+  // (the backend has no route-distance source of its own), but every money value
+  // — estimatedFare, totalFare, driverEarning, adminCommission — is derived here
+  // from the live Fare table, not from the request body.
+  const fareBreakdown = await calculateRideFare({
+    country,
+    vehicleCategory: payload.vehicleCategory,
+    distanceKm:      payload.distanceKm,
+    durationMin:     payload.durationMin,
+  });
+
+  // =====================================================
   // WALLET VALIDATION
   // =====================================================
   // ── WALLET: validate passenger has sufficient balance ────────────────────────
   if (payload.paymentMethod === 'WALLET') {
-    
+
     const passenger = await prisma.user.findUnique({
       where:  { id: passengerId },
       select: { wallet: true },
     });
 
-    const required  = payload.totalFare || 0;
+    const required  = fareBreakdown.totalFare;
     const available = passenger?.wallet ?? 0;
 
     console.log("required =>> available =>>> ", {required, available})
@@ -187,13 +202,15 @@ const createRide = async (payload: any) => {
   // =====================================================
   // ── CARD: authorize (hold) estimated fare before creating the ride ──────────
   let stripePaymentIntentId: string | null = null;
+  let usedCard: Awaited<ReturnType<typeof PaymentCardService.getDefaultCard>> | null = null;
 
   if (payload.paymentMethod === 'CARD') {
     const defaultCard = await PaymentCardService.getDefaultCard(passengerId);
+    usedCard = defaultCard;
 
     console.log("defult card =>>>>> ", defaultCard);
 
-    const authAmount  = Math.round((payload.totalFare || 0) * 1.5 * 100); // 50% buffer, in cents
+    const authAmount  = Math.round(fareBreakdown.totalFare * 1.5 * 100); // 50% buffer, in cents
 
     try {
       const intent = await stripe.paymentIntents.create(
@@ -254,11 +271,24 @@ let ride;
       paymentMethod:   payload.paymentMethod,
       distanceKm:      payload.distanceKm   || 0,
       durationMin:     payload.durationMin  || 0,
-      estimatedFare:   payload.estimatedFare || 0,
-      totalFare:       payload.totalFare    || 0,
-      driverEarning:   payload.driverEarning || 0,
-      adminCommission:      payload.adminCommission || 0,
+
+      // Fare snapshot — entirely backend-calculated, never from the request body
+      baseFare:        fareBreakdown.baseFare,
+      bookingFee:      fareBreakdown.bookingFee,
+      distanceFare:    fareBreakdown.distanceFare,
+      waitingCharge:   fareBreakdown.waitingCharge,
+      surchargeFare:   fareBreakdown.surchargeFare,
+      subtotalFare:    fareBreakdown.subtotalFare,
+      estimatedFare:   fareBreakdown.estimatedFare,
+      totalFare:       fareBreakdown.totalFare,
+      driverEarning:   fareBreakdown.driverEarning,
+      adminCommission: fareBreakdown.adminCommission,
+
       stripePaymentIntentId: stripePaymentIntentId,
+
+      paymentCardId: usedCard?.id ?? null,
+      cardBrand:     usedCard?.brand ?? null,
+      cardLast4:     usedCard?.last4 ?? null,
 
       pickupType:  payload.pickupType,
       scheduledAt: payload.scheduledAt ?? null,
@@ -295,6 +325,11 @@ let ride;
    }
    return;
  }
+
+  if (usedCard) {
+    PaymentCardService.markCardUsed(usedCard.id)
+      .catch((err) => logger.warn('createRide: markCardUsed failed:', err));
+  }
 
   // =====================================================
   // SCHEDULED RIDE
@@ -476,8 +511,21 @@ const driverAcceptRide = async (
         driverCurrentLocation: { lat: driverLat, lng: driverLng },
         pickupLocation:  { address: ride.pickupAddress,  lat: ride.pickupLat,  lng: ride.pickupLng  },
         dropoffLocation: { address: ride.dropoffAddress, lat: ride.dropoffLat, lng: ride.dropoffLng },
+        
+        baseFare: ride.baseFare ?? 0,
+        bookingFee: ride.bookingFee ?? 0,
+        distanceFare: ride.distanceFare ?? 0,
+        surchargeFare: ride.surchargeFare ?? 0,
+        waitingCharge: ride.waitingCharge ?? 0,
+        waitingTime: ride.waitingTime ?? 0,
+        tip: ride.tip ?? 0,
+        
         totalFare:           ride.totalFare,
+
         paymentMethod:       ride.paymentMethod,
+        paymentCardId: ride.paymentCardId ?? null,
+        cardBrand:     ride.cardBrand ?? null,
+        cardLast4:     ride.cardLast4 ?? null,
         estimatedArrivalMin,
         totalRides:          driverDoc?.totalTrips ?? 0,
         driverExperience,
@@ -518,15 +566,72 @@ const driverAcceptRide = async (
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// arrivedPickup — driver reports having reached the passenger's pickup point.
+// Must happen after ACCEPTED and before the ride can be started (ONGOING).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const arrivedPickup = async (rideId: string, driverId: string) => {
+  const ride = await prisma.ride.findUnique({ where: { id: rideId, isDeleted: false } });
+  if (!ride) throw new AppError(httpStatus.NOT_FOUND, 'Ride not found');
+  if (ride.driverId !== driverId) throw new AppError(httpStatus.FORBIDDEN, 'You are not the driver of this ride');
+  if (ride.status !== RideStatus.ACCEPTED) {
+    throw new AppError(httpStatus.BAD_REQUEST, `Cannot arrive at pickup in status: ${ride.status}`);
+  }
+
+  const saved = await prisma.ride.update({
+    where: { id: rideId },
+    data: {
+      status:          RideStatus.ARRIVED_PICKUP,
+      arrivedPickupAt: new Date(),
+      statusHistory:   { create: [{ status: RideStatus.ARRIVED_PICKUP }] },
+    },
+  });
+
+  try {
+    if (isManagerReady()) {
+      const statusPayload = {
+        rideId:      saved.id,
+        status:      'ARRIVED_PICKUP',
+        changedAt:   new Date(),
+        serviceType: saved.serviceType,
+        pickupType:  saved.pickupType,
+      };
+      emitToRideRoom(rideId, SocketEvents.RIDE_ARRIVED_PICKUP, statusPayload);
+      emitToPassenger(saved.passengerId, SocketEvents.RIDE_ARRIVED_PICKUP, statusPayload);
+      emitToRideRoom(rideId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
+      emitToPassenger(saved.passengerId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
+
+      sendNotificationByFcmToken(
+        saved.passengerId,
+        'Your driver has arrived at the pickup location.',
+        'Driver Arrived',
+      ).catch((err) => logger.warn('arrivedPickup: FCM to passenger failed:', err));
+    }
+  } catch (err) {
+    logger.warn('arrivedPickup: socket emission failed (non-critical):', err);
+  }
+
+  return saved;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const updateRideStatus = async (rideId: string, status: RideStatus) => {
   const ride = await prisma.ride.findUnique({ where: { id: rideId, isDeleted: false} });
   if (!ride) throw new Error('Ride not found');
 
+  if (status === RideStatus.ONGOING && ride.status !== RideStatus.ARRIVED_PICKUP) {
+    throw new AppError(
+      httpStatus.BAD_REQUEST,
+      `Cannot start ride before the driver arrives at pickup (current status: ${ride.status})`,
+    );
+  }
+
   const saved = await prisma.ride.update({
     where: { id: rideId },
     data: {
       status,
+      ...(status === RideStatus.ONGOING ? { startRideAt: new Date() } : {}),
       statusHistory: { create: [{ status }] },
     },
   });
@@ -843,6 +948,8 @@ const endRide = async (
     vehicleCategory:  ride.vehicleCategory,
     actualDistanceKm,
     promoDiscount:    ride.promoDiscount,
+    arrivedPickupAt:  ride.arrivedPickupAt,
+    startRideAt:      ride.startRideAt,
   });
 
   const saved = await prisma.ride.update({
@@ -858,6 +965,8 @@ const endRide = async (
       totalFare:            fares.totalFare,
       adminCommission:      fares.adminCommission,
       driverEarning:        fares.driverEarning,
+      waitingTime:          fares.waitingTime,
+      waitingCharge:        fares.waitingCharge,
       statusHistory:        { create: [{ status: RideStatus.END_RIDE }] },
     },
   });
@@ -913,6 +1022,8 @@ const arrivedDropoff = async (
     vehicleCategory:  ride.vehicleCategory,
     actualDistanceKm,
     promoDiscount:    ride.promoDiscount,
+    arrivedPickupAt:  ride.arrivedPickupAt,
+    startRideAt:      ride.startRideAt,
   });
 
   const saved = await prisma.ride.update({
@@ -928,6 +1039,8 @@ const arrivedDropoff = async (
       totalFare:       fares.totalFare,
       adminCommission: fares.adminCommission,
       driverEarning:   fares.driverEarning,
+      waitingTime:     fares.waitingTime,
+      waitingCharge:   fares.waitingCharge,
       statusHistory:   { create: [{ status: RideStatus.ARRIVED_DROPOFF }] },
     },
   });
@@ -963,19 +1076,23 @@ const arrivedDropoff = async (
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────────────────────
-// processWalletRidePayment — auto-deduct passenger wallet when driver confirms
-// dropoff. Mirror of captureRidePayment (CARD) for WALLET rides.
+// processWalletRidePayment — called from payRide() once the passenger explicitly
+// confirms (with an optional tip). Mirror of captureRidePayment (CARD) for
+// WALLET rides. Commission is charged on the fare only — the tip passes
+// through to the driver in full.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const processWalletRidePayment = async (ride: any): Promise<void> => {
+const processWalletRidePayment = async (ride: any, tip = 0): Promise<void> => {
   const rideId      = ride.id as string;
-  const totalFare   = (ride.totalFare ?? 0) as number;
+  const tipAmount   = Math.max(0, Math.round(tip));
+  const fareOnly    = (ride.totalFare ?? 0) as number;
+  const totalFare   = fareOnly + tipAmount;
   const passengerId = ride.passengerId as string;
   const driverId    = ride.driverId   as string | null;
 
   const fareConfig      = await prisma.fare.findFirst({ where: { country: ride.country, isActive: true } });
   const commissionPct   = fareConfig?.platformCommissionPercentage ?? 0;
-  const adminCommission = Math.round((totalFare * commissionPct) / 100);
+  const adminCommission = Math.round((fareOnly * commissionPct) / 100);
   const driverEarning   = Math.round(totalFare - adminCommission);
 
   // Atomic: deduct wallet + complete ride + credit driver
@@ -990,6 +1107,8 @@ const processWalletRidePayment = async (ride: any): Promise<void> => {
     await tx.ride.update({
       where: { id: rideId },
       data:  {
+        tip:             tipAmount,
+        totalFare,
         paymentStatus:   'PAID',
         status:          RideStatus.COMPLETED,
         adminCommission,
@@ -1047,7 +1166,8 @@ const processWalletRidePayment = async (ride: any): Promise<void> => {
     totalFare,
     driverEarning,
     adminCommission,
-    paymentMethod: 'WALLET',
+    tip:            tipAmount,
+    paymentMethod:  'WALLET',
   }).catch((err) => logger.warn('WALLET: payment record failed:', err));
 
   // Ride completed email
@@ -1097,43 +1217,57 @@ const processWalletRidePayment = async (ride: any): Promise<void> => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const confirmDropoff = async (rideId: string, driverId: string) => {
-  const ride = await prisma.ride.findUnique(
-    { where: { id: rideId, isDeleted: false },
-     include: {
-      passenger: {
-        select: {
-          id: true,
-          name: true,
-          email: true,
-        },
-      },
-    }, 
-  });
+  const ride = await prisma.ride.findUnique({ where: { id: rideId, isDeleted: false } });
 
   if (!ride) throw new AppError(httpStatus.NOT_FOUND, 'Ride not found');
 
   if (ride.driverId !== driverId) throw new AppError(httpStatus.FORBIDDEN, 'You are not the driver of this ride');
-  
+
   if (ride.status !== RideStatus.END_RIDE && ride.status !== RideStatus.ARRIVED_DROPOFF) {
     throw new AppError(httpStatus.BAD_REQUEST, `Cannot confirm dropoff in status: ${ride.status}`);
   }
 
-  const saved = await prisma.ride.update({
-    where: { id: rideId },
-    data: {
-      status:       RideStatus.CONFIRM_DROPOFF,
-      statusHistory: { create: [{ status: RideStatus.CONFIRM_DROPOFF }] },
-    },
-  });
-
-  // Release driver from ride in DB
-  await prisma.driverProfile.update({
-    where: { id: driverId },
-    data:  { isOnRide: false },
-  });
+  // Independent writes — update the ride status and release the driver concurrently.
+  const [saved] = await Promise.all([
+    prisma.ride.update({
+      where: { id: rideId },
+      data: {
+        status:       RideStatus.CONFIRM_DROPOFF,
+        statusHistory: { create: [{ status: RideStatus.CONFIRM_DROPOFF }] },
+      },
+    }),
+    prisma.driverProfile.update({
+      where: { id: driverId },
+      data:  { isOnRide: false },
+    }),
+  ]);
 
   try {
     if (isManagerReady()) {
+      const driverDoc = await prisma.driverProfile.findUnique({
+        where:  { id: driverId },
+        select: {
+          vehicleBrand: true, vehicleModel: true, vehicleType: true,
+          licenseNumber: true, currentLat: true, currentLng: true,
+          averageRating: true, totalTrips: true, createdAt: true,
+          user: { select: { name: true, profileImage: true, averageRating: true, phoneNumber: true, countryCode: true } },
+        },
+      });
+
+      // How long driver has been on platform
+      const joinedAt    = driverDoc?.createdAt;
+      const diffMs      = joinedAt ? Date.now() - new Date(joinedAt).getTime() : 0;
+      const diffDays    = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      const totalMonths = Math.floor(diffDays / 30.44);
+      const years       = Math.floor(totalMonths / 12);
+      const months      = totalMonths % 12;
+
+      let driverExperience: string;
+      if (diffDays < 30)           driverExperience = diffDays <= 1 ? '1 day' : `${diffDays} days`;
+      else if (totalMonths < 12)   driverExperience = totalMonths === 1 ? '1 month' : `${totalMonths} months`;
+      else if (months === 0)       driverExperience = years === 1 ? '1 year' : `${years} years`;
+      else                         driverExperience = `${years}.${months} year`;
+
       const payload = {
         rideId:          saved.id,
         pickupLocation:  { address: saved.pickupAddress,  lat: saved.pickupLat,  lng: saved.pickupLng  },
@@ -1141,16 +1275,102 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
         distanceKm:      saved.distanceKm,
         durationMin:     saved.durationMin,
         estimatedFare:   saved.estimatedFare,
+
+        baseFare: ride.baseFare ?? 0,
+        bookingFee: ride.bookingFee ?? 0,
+        distanceFare: ride.distanceFare ?? 0,
+        surchargeFare: ride.surchargeFare ?? 0,
+        waitingCharge: ride.waitingCharge ?? 0,
+        waitingTime: ride.waitingTime ?? 0,
+        tip: ride.tip ?? 0,
+        
         totalFare:       saved.totalFare,
         driverEarning:   saved.driverEarning,
         adminCommission: saved.adminCommission,
         promoDiscount:   saved.promoDiscount,
         paymentMethod:   saved.paymentMethod,
+        paymentCardId: ride.paymentCardId ?? null,
+        cardBrand:     ride.cardBrand ?? null,
+        cardLast4:     ride.cardLast4 ?? null,
         changedAt:       new Date(),
         serviceType:     saved.serviceType,
         pickupType:      saved.pickupType,
       };
-      const confirmStatusPayload = { rideId: saved.id, status: 'CONFIRM_DROPOFF', changedAt: new Date(), serviceType: saved.serviceType, pickupType: saved.pickupType };
+
+
+      const confirmStatusPayload = {
+        rideId: saved.id,
+        status: 'CONFIRM_DROPOFF',
+        changedAt: new Date(),
+
+        // Driver Info
+        driverProfileId: driverId,
+        driverName: driverDoc?.user?.name ?? '',
+        driverProfileImage: driverDoc?.user?.profileImage ?? '',
+        driverAverageRating:
+          driverDoc?.averageRating ??
+          driverDoc?.user?.averageRating ??
+          0,
+        driverPhoneNumber: driverDoc?.user?.phoneNumber ?? '',
+        driverCountryCode: driverDoc?.user?.countryCode ?? '',
+
+        vehicleBrand: driverDoc?.vehicleBrand ?? '',
+        vehicleModel: driverDoc?.vehicleModel ?? '',
+        vehicleType: driverDoc?.vehicleType ?? '',
+        licenseNumber: driverDoc?.licenseNumber ?? '',
+
+        driverCurrentLocation: {
+          lat: saved.actualDropoffLat ?? saved.dropoffLat,
+          lng: saved.actualDropoffLng ?? saved.dropoffLng,
+        },
+
+        // Ride
+        pickupLocation: {
+          address: saved.pickupAddress,
+          lat: saved.pickupLat,
+          lng: saved.pickupLng,
+        },
+        dropoffLocation: {
+          address: saved.dropoffAddress,
+          lat: saved.dropoffLat,
+          lng: saved.dropoffLng,
+        },
+
+        distanceKm: saved.distanceKm,
+        durationMin: saved.durationMin,
+
+        // Fare Breakdown
+        estimatedFare: saved.estimatedFare,
+        baseFare: saved.baseFare ?? 0,
+        bookingFee: saved.bookingFee ?? 0,
+        distanceFare: saved.distanceFare ?? 0,
+        surchargeFare: saved.surchargeFare ?? 0,
+        waitingCharge: saved.waitingCharge ?? 0,
+        waitingTime: saved.waitingTime ?? 0,
+        tip: saved.tip ?? 0,
+        promoDiscount: saved.promoDiscount ?? 0,
+
+        totalFare: saved.totalFare,
+        driverEarning: saved.driverEarning,
+        adminCommission: saved.adminCommission,
+
+        // Payment
+        paymentMethod: saved.paymentMethod,
+        paymentCardId: saved.paymentCardId ?? null,
+        cardBrand: saved.cardBrand ?? null,
+        cardLast4: saved.cardLast4 ?? null,
+
+        // Driver Stats
+        totalRides: driverDoc?.totalTrips ?? 0,
+        driverExperience,
+
+        // Ride Meta
+        acceptedAt: saved.driverAcceptedAt,
+        serviceType: saved.serviceType,
+        pickupType: saved.pickupType,
+      };
+
+
       emitToRideRoom(rideId, SocketEvents.RIDE_CONFIRM_DROPOFF, payload);
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_CONFIRM_DROPOFF, payload);
       emitToRideRoom(rideId, SocketEvents.RIDE_STATUS_UPDATED, confirmStatusPayload);
@@ -1160,17 +1380,9 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
     logger.warn('confirmDropoff: socket emission failed (non-critical):', err);
   }
 
-  // CARD: auto-capture the held PaymentIntent → ride becomes COMPLETED + PAID
-  if (ride.paymentMethod === 'CARD' && ride.stripePaymentIntentId) {
-    PaymentService.captureRidePayment(rideId)
-      .catch((err: unknown) => logger.warn('confirmDropoff: CARD auto-capture failed:', err));
-  }
-
-  // WALLET: auto-deduct passenger wallet → ride becomes COMPLETED + PAID
-  if (ride.paymentMethod === 'WALLET') {
-    processWalletRidePayment(ride)
-      .catch((err: unknown) => logger.warn('confirmDropoff: WALLET auto-payment failed:', err));
-  }
+  // CARD/WALLET are no longer auto-charged here — the passenger reviews the
+  // trip, optionally adds a tip, and explicitly confirms via payRide()
+  // (PATCH /pay/:rideId), same as the existing CASH flow.
 
   return saved;
 };
@@ -1178,13 +1390,28 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const payRide = async (rideId: string, passengerId: string, tip = 0) => {
-  const ride = await prisma.ride.findUnique({ where: { id: rideId, isDeleted: false } });
+  const ride = await prisma.ride.findUnique({
+    where: { id: rideId, isDeleted: false },
+    include: { passenger: { select: { id: true, name: true, email: true } } },
+  });
   if (!ride)                             throw new AppError(httpStatus.NOT_FOUND,  'Ride not found');
   if (ride.passengerId !== passengerId)  throw new AppError(httpStatus.FORBIDDEN,  'You are not the passenger of this ride');
   if (ride.status !== RideStatus.CONFIRM_DROPOFF) throw new AppError(httpStatus.BAD_REQUEST, `Payment not allowed in status: ${ride.status}`);
-  if (ride.paymentMethod !== 'CASH')     throw new AppError(httpStatus.BAD_REQUEST, 'This endpoint is only for CASH payments.');
   if (ride.paymentStatus === 'PAID')     throw new AppError(httpStatus.CONFLICT,   'Ride already paid');
 
+  // Passenger has reviewed the trip and confirmed — this is where CARD/WALLET
+  // actually get charged now (moved out of confirmDropoff's auto-capture).
+  if (ride.paymentMethod === 'CARD') {
+    await PaymentService.captureRidePayment(rideId, tip);
+    return prisma.ride.findUnique({ where: { id: rideId } });
+  }
+
+  if (ride.paymentMethod === 'WALLET') {
+    await processWalletRidePayment(ride, tip);
+    return prisma.ride.findUnique({ where: { id: rideId } });
+  }
+
+  // ── CASH ──────────────────────────────────────────────────────────────────
   const tipAmount    = Math.max(0, Math.round(tip));
   const newTotalFare = (ride.totalFare ?? 0) + tipAmount;
 
@@ -1636,12 +1863,15 @@ const getRecentRides = async (
   query:  Record<string, unknown>,
 ) => {
   const { skip, take, page, limit } = buildPagination(query);
-  const searchTerm = query.searchTerm as string | undefined;
+  const searchTerm  = query.searchTerm as string | undefined;
+  const serviceType = (query.serviceType as string | undefined)?.trim();
 
   const where: Prisma.RideWhereInput = {
     ...(role === 'driver' ? { driverId: userId } : { passengerId: userId }),
     isDeleted: false,
     status: RideStatus.COMPLETED,
+
+    ...(serviceType && { serviceType: serviceType.toUpperCase() as ServiceType }),
 
     ...(searchTerm && {
       OR: [
@@ -1784,13 +2014,17 @@ const getMyActiveRide = async (id: string, role: 'passenger' | 'driver') => {
   };
 
 
-  return prisma.ride.findFirst({
+  const ride = await prisma.ride.findFirst({
     where,
     orderBy: { createdAt: 'desc' },
     include: role === 'driver'
       ? { passenger: { select: passengerSelect } }
       : { driver:    { include: driverInclude } },
   });
+
+  if (!ride) return ride;
+
+  return { ...ride, fareBreakdown: buildFareBreakdown(ride) };
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1853,6 +2087,7 @@ export const RideService = {
   getRideReview,
   getMyActiveRide,
   driverAcceptRide,
+  arrivedPickup,
   updateRideStatus,
   endRide,
   arrivedDropoff,
