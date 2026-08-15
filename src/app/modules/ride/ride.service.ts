@@ -31,6 +31,42 @@ import { sentNotificationForRideCancelled } from '../../../socketIo';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// Passenger-facing status copy — worded per serviceType (a PARCEL delivery reads
+// very differently from a passenger RIDE even though they share the same RideStatus).
+const RIDE_STATUS_MESSAGES: Partial<Record<RideStatus, string>> = {
+  ACCEPTED:  'Your driver is on the way to your pickup location.',
+  ONGOING:   'Your ride is underway.',
+  COMPLETED: 'You have arrived at your destination.',
+  CANCELLED: 'Your ride request has been cancelled.',
+};
+
+const PARCEL_STATUS_MESSAGES: Partial<Record<RideStatus, string>> = {
+  ACCEPTED:  `Your courier is on the way to pick up your package.`,
+  ONGOING:   `Your package is on the way to the delivery location.`,
+  COMPLETED: 'Your package has been delivered successfully.',
+  CANCELLED: 'Your delivery request has been cancelled.',
+};
+
+const RIDE_STATUS_TITLES: Partial<Record<RideStatus, string>> = {
+  ACCEPTED:  'Ride Accepted',
+  ONGOING:   'Ride in Progress',
+  COMPLETED: 'Ride Completed',
+  CANCELLED: 'Ride Cancelled',
+};
+
+const PARCEL_STATUS_TITLES: Partial<Record<RideStatus, string>> = {
+  ACCEPTED:  'Courier Assigned',
+  ONGOING:   'Delivery in Progress',
+  COMPLETED: 'Delivery Completed',
+  CANCELLED: 'Delivery Cancelled',
+};
+
+const STATUS_NOTIFICATION_TYPE: Partial<Record<RideStatus, Parameters<typeof saveNotification>[0]['type']>> = {
+  ONGOING:   'rideStarted',
+  COMPLETED: 'rideCompleted',
+  CANCELLED: 'tripCancelled',
+};
+
 const buildPagination = (query: Record<string, unknown>) => {
   const page  = Math.max(1, Number(query.page)  || 1);
   const limit = Math.max(1, Number(query.limit) || 10);
@@ -278,6 +314,7 @@ let ride;
       distanceFare:    fareBreakdown.distanceFare,
       waitingCharge:   fareBreakdown.waitingCharge,
       surchargeFare:   fareBreakdown.surchargeFare,
+      governmentTax:   fareBreakdown.governmentTax,
       subtotalFare:    fareBreakdown.subtotalFare,
       estimatedFare:   fareBreakdown.estimatedFare,
       totalFare:       fareBreakdown.totalFare,
@@ -516,10 +553,11 @@ const driverAcceptRide = async (
         bookingFee: ride.bookingFee ?? 0,
         distanceFare: ride.distanceFare ?? 0,
         surchargeFare: ride.surchargeFare ?? 0,
+        governmentTax: ride.governmentTax ?? 0,
         waitingCharge: ride.waitingCharge ?? 0,
         waitingTime: ride.waitingTime ?? 0,
         tip: ride.tip ?? 0,
-        
+
         totalFare:           ride.totalFare,
 
         paymentMethod:       ride.paymentMethod,
@@ -543,10 +581,15 @@ const driverAcceptRide = async (
 
       notifyRideTaken(rideId, driverId);
 
+
+      const isParcel = ride.serviceType === 'PARCEL';
+
+
+
       sendNotificationByFcmToken(
         ride.passengerId,
-        `${driverDoc?.user?.name ?? 'Your driver'} accepted your ride. They are on the way!`,
-        'Ride Accepted',
+        (isParcel ? PARCEL_STATUS_MESSAGES : RIDE_STATUS_MESSAGES).ACCEPTED!,
+        (isParcel ? PARCEL_STATUS_TITLES : RIDE_STATUS_TITLES).ACCEPTED!,
       ).catch((err) => logger.warn('driverAcceptRide: FCM to passenger failed:', err));
 
       saveNotification({
@@ -601,10 +644,14 @@ const arrivedPickup = async (rideId: string, driverId: string) => {
       emitToRideRoom(rideId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
 
+      const isParcel = saved.serviceType === 'PARCEL';
+
       sendNotificationByFcmToken(
         saved.passengerId,
-        'Your driver has arrived at the pickup location.',
-        'Driver Arrived',
+        isParcel
+          ? 'Your courier has arrived at the pickup location.'
+          : 'Your driver has arrived at the pickup location.',
+        isParcel ? 'Courier Arrived' : 'Driver Arrived',
       ).catch((err) => logger.warn('arrivedPickup: FCM to passenger failed:', err));
     }
   } catch (err) {
@@ -649,31 +696,24 @@ const updateRideStatus = async (rideId: string, status: RideStatus) => {
       emitToRideRoom(rideId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
 
-      const statusMessages: Partial<Record<RideStatus, string>> = {
-        ACCEPTED:  'Your ride has been accepted. Driver is on the way!',
-        ONGOING:   'Your ride has started. Enjoy your trip!',
-        COMPLETED: 'Your ride is completed. Thank you for riding with us!',
-        CANCELLED: 'Your ride has been cancelled.',
-      };
-      const statusNotifType: Partial<Record<RideStatus, { type: Parameters<typeof saveNotification>[0]['type']; text: string }>> = {
-        ONGOING:   { type: 'rideStarted',   text: 'Your ride has started. Enjoy your trip!' },
-        COMPLETED: { type: 'rideCompleted', text: 'Your ride is completed. Thank you for riding with us!' },
-        CANCELLED: { type: 'tripCancelled', text: 'Your ride has been cancelled.' },
-      };
+      const isParcel = saved.serviceType === 'PARCEL';
+      const statusMessages = isParcel ? PARCEL_STATUS_MESSAGES : RIDE_STATUS_MESSAGES;
+      const statusTitles   = isParcel ? PARCEL_STATUS_TITLES   : RIDE_STATUS_TITLES;
 
-      const fcmBody = statusMessages[status];
+      const fcmBody  = statusMessages[status];
+      const fcmTitle = statusTitles[status] ?? (isParcel ? 'Mino Parcel' : 'Mino Ride');
       if (fcmBody) {
-        sendNotificationByFcmToken(saved.passengerId, fcmBody, 'Mino Ride')
+        sendNotificationByFcmToken(saved.passengerId, fcmBody, fcmTitle)
           .catch((err) => logger.warn('updateRideStatus: FCM to passenger failed:', err));
       }
 
-      const notifEntry = statusNotifType[status];
-      if (notifEntry && saved.driverId) {
+      const notifType = STATUS_NOTIFICATION_TYPE[status];
+      if (notifType && fcmBody && saved.driverId) {
         saveNotification({
           senderId:   saved.driverId,
           receiverId: saved.passengerId,
-          text:       notifEntry.text,
-          type:       notifEntry.type,
+          text:       fcmBody,
+          type:       notifType,
         });
       }
 
@@ -880,8 +920,8 @@ const applyPromoToRide = async (rideId: string, promoCode: string) => {
   const fare = await prisma.fare.findFirst({ where: { country: ride.country, isActive: true } });
   if (!fare) throw new Error('Fare configuration not found for this country');
 
-  const discount       = Math.min(promo.discount, ride.totalFare);
-  const newTotalFare   = ride.totalFare - discount;
+  const discount       = Math.round(Math.min(promo.discount, ride.totalFare));
+  const newTotalFare   = Math.round(ride.totalFare - discount);
   const adminCommission = (newTotalFare * fare.platformCommissionPercentage) / 100;
   const driverEarning  = newTotalFare - adminCommission;
 
@@ -967,6 +1007,7 @@ const endRide = async (
       driverEarning:        fares.driverEarning,
       waitingTime:          fares.waitingTime,
       waitingCharge:        fares.waitingCharge,
+      governmentTax:        fares.governmentTax,
       statusHistory:        { create: [{ status: RideStatus.END_RIDE }] },
     },
   });
@@ -1041,6 +1082,7 @@ const arrivedDropoff = async (
       driverEarning:   fares.driverEarning,
       waitingTime:     fares.waitingTime,
       waitingCharge:   fares.waitingCharge,
+      governmentTax:   fares.governmentTax,
       statusHistory:   { create: [{ status: RideStatus.ARRIVED_DROPOFF }] },
     },
   });
@@ -1065,6 +1107,16 @@ const arrivedDropoff = async (
       emitToRideRoom(rideId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_ENDED, arrivedPayload);
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_STATUS_UPDATED, statusPayload);
+
+      const isParcel = saved.serviceType === 'PARCEL';
+
+      sendNotificationByFcmToken(
+        saved.passengerId,
+        isParcel
+          ? 'Your courier has arrived at the delivery location.'
+          : 'You have reached your destination.',
+        isParcel ? 'Courier Arrived' : `You’ve Arrived`,
+      ).catch((err) => logger.warn('arrivedPickup: FCM to passenger failed:', err));
     }
   } catch (err) {
     logger.warn('arrivedDropoff: socket emission failed (non-critical):', err);
@@ -1216,7 +1268,7 @@ const processWalletRidePayment = async (ride: any, tip = 0): Promise<void> => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-const confirmDropoff = async (rideId: string, driverId: string) => {
+const confirmDropoff = async (rideId: string, driverId: string, deliveryProofImage?: string) => {
   const ride = await prisma.ride.findUnique({ where: { id: rideId, isDeleted: false } });
 
   if (!ride) throw new AppError(httpStatus.NOT_FOUND, 'Ride not found');
@@ -1233,6 +1285,7 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
       where: { id: rideId },
       data: {
         status:       RideStatus.CONFIRM_DROPOFF,
+        ...(deliveryProofImage && { deliveryProofImage }),
         statusHistory: { create: [{ status: RideStatus.CONFIRM_DROPOFF }] },
       },
     }),
@@ -1280,6 +1333,7 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
         bookingFee: ride.bookingFee ?? 0,
         distanceFare: ride.distanceFare ?? 0,
         surchargeFare: ride.surchargeFare ?? 0,
+        governmentTax: ride.governmentTax ?? 0,
         waitingCharge: ride.waitingCharge ?? 0,
         waitingTime: ride.waitingTime ?? 0,
         tip: ride.tip ?? 0,
@@ -1292,6 +1346,7 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
         paymentCardId: ride.paymentCardId ?? null,
         cardBrand:     ride.cardBrand ?? null,
         cardLast4:     ride.cardLast4 ?? null,
+        deliveryProofImage: saved.deliveryProofImage ?? null,
         changedAt:       new Date(),
         serviceType:     saved.serviceType,
         pickupType:      saved.pickupType,
@@ -1345,6 +1400,7 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
         bookingFee: saved.bookingFee ?? 0,
         distanceFare: saved.distanceFare ?? 0,
         surchargeFare: saved.surchargeFare ?? 0,
+        governmentTax: saved.governmentTax ?? 0,
         waitingCharge: saved.waitingCharge ?? 0,
         waitingTime: saved.waitingTime ?? 0,
         tip: saved.tip ?? 0,
@@ -1359,6 +1415,9 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
         paymentCardId: saved.paymentCardId ?? null,
         cardBrand: saved.cardBrand ?? null,
         cardLast4: saved.cardLast4 ?? null,
+
+        // Delivery proof (parcel rides)
+        deliveryProofImage: saved.deliveryProofImage ?? null,
 
         // Driver Stats
         totalRides: driverDoc?.totalTrips ?? 0,
@@ -1375,6 +1434,16 @@ const confirmDropoff = async (rideId: string, driverId: string) => {
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_CONFIRM_DROPOFF, payload);
       emitToRideRoom(rideId, SocketEvents.RIDE_STATUS_UPDATED, confirmStatusPayload);
       emitToPassenger(saved.passengerId, SocketEvents.RIDE_STATUS_UPDATED, confirmStatusPayload);
+
+      const isParcel = saved.serviceType === 'PARCEL';
+
+      sendNotificationByFcmToken(
+        saved.passengerId,
+        isParcel
+          ? 'Your package has been delivered successfully.'
+          : 'Please confirm that you have reached your destination.',
+        isParcel ? 'Delivery Completed' : 'Confirm Drop-off',
+      ).catch((err) => logger.warn('arrivedPickup: FCM to passenger failed:', err));
     }
   } catch (err) {
     logger.warn('confirmDropoff: socket emission failed (non-critical):', err);
@@ -1698,8 +1767,8 @@ const cancelRide = async (
         if (!driverProfile) return;
 
         const notifyPayload = cancelledBy === CancellationActor.DRIVER
-          ? { userId: driverProfile.userId, receiverId: saved.passengerId, reason: reason ?? undefined }
-          : { userId: saved.passengerId, receiverId: driverProfile.userId, reason: reason ?? undefined };
+          ? { userId: driverProfile.userId, receiverId: saved.passengerId, reason: reason ?? undefined, serviceType: saved.serviceType }
+          : { userId: saved.passengerId, receiverId: driverProfile.userId, reason: reason ?? undefined, serviceType: saved.serviceType };
 
         return sentNotificationForRideCancelled(notifyPayload);
       })

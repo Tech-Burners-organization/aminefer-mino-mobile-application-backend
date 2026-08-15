@@ -26,6 +26,8 @@ export interface NotificationPayload {
     photos?: string[];
   };
   type?: string;
+  /** FCM push title override — defaults to message.fullName (sender name) when omitted. */
+  title?: string;
 }
 
 // ── emitNotification ──────────────────────────────────────────────────────
@@ -36,6 +38,7 @@ export const emitNotification = async ({
   receiverId,
   message,
   type,
+  title,
 }: NotificationPayload): Promise<void> => {
   const io = getIO();
   const userSocket = connectedUsers.get(receiverId);
@@ -68,7 +71,7 @@ export const emitNotification = async ({
   });
 
   if (message?.text) {
-    sendNotificationByFcmToken(receiverId, message.text, message.fullName)
+    sendNotificationByFcmToken(receiverId, message.text, title ?? message.fullName)
       .catch((err) => console.error('FCM notification failed:', err));
   }
 };
@@ -112,10 +115,12 @@ export const sentNotificationForRideCancelled = async ({
   userId,
   receiverId,
   reason,
+  serviceType,
 }: {
   userId: string;
   receiverId: string;
   reason?: string;
+  serviceType?: string;
 }): Promise<void> => {
   const [sender, receiver] = await Promise.all([
     prisma.user.findUnique({ where: { id: userId },     select: { name: true, profileImage: true } }),
@@ -124,20 +129,29 @@ export const sentNotificationForRideCancelled = async ({
 
   if (!sender || !receiver) return;
 
-  const text = reason
-    ? `${sender.name} has cancelled the ride. Reason: ${reason}`
+  const isParcel = serviceType === 'PARCEL';
+  const baseText = isParcel
+    ? `${sender.name} has cancelled the parcel delivery.`
     : `${sender.name} has cancelled the ride.`;
+
+  // Reason goes on its own line rather than being appended inline to the sentence.
+  const text = reason ? `${baseText}\nReason: ${reason}` : baseText;
 
   emitNotification({
     userId,
     receiverId,
     message: { fullName: sender.name ?? '', image: sender.profileImage, text, photos: [] },
     type: 'tripCancelled',
+    title: isParcel ? 'Delivery Cancelled' : 'Ride Cancelled',
   }).catch((err) => console.error('Socket notification failed:', err));
 
   if (receiver.email) {
-    sendNotificationEmail({ sentTo: receiver.email, subject: 'Ride Cancelled', userName: receiver.name || '', messageText: text })
-      .catch((err) => console.error('Email notification failed:', err));
+    sendNotificationEmail({
+      sentTo:      receiver.email,
+      subject:     isParcel ? 'Parcel Delivery Cancelled' : 'Ride Cancelled',
+      userName:    receiver.name || '',
+      messageText: text,
+    }).catch((err) => console.error('Email notification failed:', err));
   }
 };
 

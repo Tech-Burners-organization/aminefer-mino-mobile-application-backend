@@ -477,6 +477,8 @@ model Ride {
 
   driverAcceptedAt DateTime?
 
+  deliveryProofImage String?
+
   // Waiting-charge timing — driver-wait window is arrivedPickupAt → startRideAt
   arrivedPickupAt DateTime?
   startRideAt     DateTime?

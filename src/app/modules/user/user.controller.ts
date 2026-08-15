@@ -5,6 +5,8 @@ import { userService } from './user.service';
 
 import httpStatus from 'http-status';
 import { storeFile, storeFiles } from '../../utils/fileHelper';
+import { deleteFile } from '../../utils/deleteFile';
+import AppError from '../../error/AppError';
 
 
 const createUser = catchAsync(async (req: Request, res: Response) => {
@@ -71,7 +73,38 @@ const updateMyProfile = catchAsync(async (req: Request, res: Response) => {
     message: 'Profile updated successfully',
     data: { ...rest, accessToken },
   });
-  
+
+});
+
+// Standalone image upload — stores the file and returns its URL. Does not
+// touch the database; the caller decides what to do with the returned path.
+const uploadImage = catchAsync(async (req: Request, res: Response) => {
+  if (!req.file) throw new AppError(httpStatus.BAD_REQUEST, 'No image file provided');
+
+  const image = storeFile('ride', req.file.filename);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: 'Image uploaded successfully',
+    data: { image },
+  });
+});
+
+// Standalone image delete — removes the file from disk by its stored path.
+// Does not touch the database.
+const deleteImage = catchAsync(async (req: Request, res: Response) => {
+  const { image } = req.body;
+  if (!image) throw new AppError(httpStatus.BAD_REQUEST, 'image is required');
+
+  deleteFile(image);
+
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: 'Image deleted successfully',
+    data: null,
+  });
 });
 
 const createSuperAdmin = catchAsync(
@@ -340,6 +373,8 @@ export const userController = {
   createUser,
   userCreateVarification,
   updateMyProfile,
+  uploadImage,
+  deleteImage,
   createSuperAdmin,
   getMyProfile,
   getAdminProfile,

@@ -45,6 +45,11 @@ import {
 
 const RideIdSchema = z.object({ rideId: z.string().min(1) });
 
+const ConfirmDropoffSchema = z.object({
+  rideId: z.string().min(1),
+  deliveryProofImage: z.string().min(1).optional(),
+});
+
 const CancelRideSchema = z.object({
   rideId: z.string().min(1),
   reason: z.string().min(1).max(500),
@@ -115,6 +120,18 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
   }
 
   broadcastOnlineUsers();
+
+  // Send this user's current unread notification count on connect
+  prisma.notification.count({ where: { receiverId: userId, isRead: false } })
+    .then((unreadCount) => {
+      socket.emit(SocketEvents.NOTIFICATION, {
+        statusCode: 200,
+        success:    true,
+        unreadCount,
+        timestamp:  new Date(),
+      });
+    })
+    .catch((err) => logger.error('Failed to fetch unread notification count on connect:', err));
 
   logger.info(`[CONNECT] ${name} (${role}) socket=${socket.id}`);
 
@@ -601,16 +618,18 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
           return sendAck(ackFn, { success: false, error: 'Only drivers can confirm dropoff', code: 403 });
         }
 
-        const data = validate(RideIdSchema, payload, ackFn);
+        const data = validate(ConfirmDropoffSchema, payload, ackFn);
         if (!data) return;
 
         const ride = await prisma.ride.findUnique({
           where:   { id: data.rideId, isDeleted: false },
           include: { passenger: { select: { name: true, profileImage: true } } },
         });
+
+
         if (!ride) return sendAck(ackFn, { success: false, error: 'Ride not found', code: 404 });
 
-        await RideService.confirmDropoff(data.rideId, driverProfileId);
+        await RideService.confirmDropoff(data.rideId, driverProfileId, data.deliveryProofImage);
 
         sendAck(ackFn, {
           success: true,
@@ -629,6 +648,7 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
               bookingFee: ride.bookingFee ?? 0,
               distanceFare: ride.distanceFare ?? 0,
               surchargeFare: ride.surchargeFare ?? 0,
+              governmentTax: ride.governmentTax ?? 0,
               waitingCharge: ride.waitingCharge ?? 0,
               waitingTime: ride.waitingTime ?? 0,
               tip: ride.tip ?? 0,
@@ -642,6 +662,7 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
               paymentCardId: ride.paymentCardId ?? null,
               cardBrand:     ride.cardBrand ?? null,
               cardLast4:     ride.cardLast4 ?? null,
+              deliveryProofImage: data.deliveryProofImage ?? ride.deliveryProofImage ?? null,
               changedAt:       new Date(),
               serviceType:     ride.serviceType,
               pickupType:      ride.pickupType,
@@ -711,6 +732,32 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
       }
     },
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // NOTIFICATION EVENTS
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * readNotification
+   * Mark all of this user's unread notifications as read.
+   */
+  socket.on(SocketEvents.READ_NOTIFICATION, () => {
+    if (!userId) return;
+
+    // Fire-and-forget: mark as read asynchronously
+    prisma.notification.updateMany({
+      where: { receiverId: userId, isRead: false },
+      data:  { isRead: true },
+    }).catch((err) => logger.error('Error updating notifications:', err));
+
+    // Immediately emit unread count (0)
+    socket.emit(SocketEvents.NOTIFICATION, {
+      statusCode:  200,
+      success:     true,
+      unreadCount: 0,
+      timestamp:   new Date(),
+    });
+  });
 
   // ─────────────────────────────────────────────────────────────────────────
   // DISCONNECT

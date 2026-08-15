@@ -243,9 +243,9 @@ const endRide = catchAsync(async (req: Request, res: Response) => {
 const confirmDropoff = catchAsync(async (req: Request, res: Response) => {
   const { driverProfileId } = req.user;
   const { rideId } = req.params;
+  const { deliveryProofImage } = req.body;
 
-
-  const result = await RideService.confirmDropoff(rideId, driverProfileId);
+  const result = await RideService.confirmDropoff(rideId, driverProfileId, deliveryProofImage);
 
   sendResponse(res, {
     statusCode: 200,

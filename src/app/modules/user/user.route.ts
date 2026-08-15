@@ -7,7 +7,7 @@ import { verifyOtpValidations } from '../otp/otp.validation';
 import { userController } from './user.controller';
 import { userValidation } from './user.validation';
 import { USER_ROLE } from './user.constants';
-const upload = fileUpload('./public/uploads/profile');
+const upload = fileUpload('./public/uploads/ride');
 
 export const userRoutes = Router();
 
@@ -85,6 +85,20 @@ userRoutes
     ]),
     parseData(),
     userController.updateMyProfile,
+  )
+
+  // ── Standalone image upload/delete (no DB write — caller decides what to do with the URL) ──
+  .post(
+    '/upload-image',
+    // auth(USER_ROLE.PASSENGER, USER_ROLE.DRIVER, USER_ROLE.ADMIN, USER_ROLE.SUPERADMIN),
+    upload.single('image'),
+    userController.uploadImage,
+  )
+
+  .delete(
+    '/delete-image',
+    // auth(USER_ROLE.PASSENGER, USER_ROLE.DRIVER, USER_ROLE.ADMIN, USER_ROLE.SUPERADMIN),
+    userController.deleteImage,
   )
 
   .patch(

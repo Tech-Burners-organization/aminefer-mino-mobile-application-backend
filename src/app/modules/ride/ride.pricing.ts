@@ -19,6 +19,7 @@ export interface RideFareBreakdown {
   distanceFare:    number;
   waitingCharge:   number;
   surchargeFare:   number;
+  governmentTax:   number;
   subtotalFare:    number;
   estimatedFare:   number;
   totalFare:       number;
@@ -66,34 +67,46 @@ export const computeFareBreakdown = (
   const pricingMap = vehiclePricingFromFare(fare);
   const pricing     = pricingMap[vehicleCategory as TVehicleCategory] ?? pricingMap.MINO_GO;
 
-  const baseFare     = pricing.baseFee;
-  const bookingFee   = pricing.bookingFee;
-  const distanceFare = pricing.ratePerKm * distanceKm;
+  // Round every line item as soon as it's computed, then build every downstream
+  // total purely from already-rounded numbers. Rounding a separately-computed
+  // aggregate (e.g. Math.round(subtotal) vs. summing Math.round()'d parts) can
+  // disagree by ±1 — this is why some rides showed a totalFare 1 Taka off from
+  // what the displayed breakdown adds up to. Summing rounded parts guarantees
+  // the breakdown always matches totalFare exactly.
+  const baseFare     = Math.round(pricing.baseFee);
+  const bookingFee   = Math.round(pricing.bookingFee);
+  const distanceFare = Math.round(pricing.ratePerKm * distanceKm);
 
   const subtotalFare  = baseFare + bookingFee + distanceFare;
-  const estimatedFare = Math.max(subtotalFare, pricing.minimumFare);
+  const estimatedFare = Math.max(subtotalFare, Math.round(pricing.minimumFare));
 
   // Waiting charge depends on actual driver-wait time (arrivedPickupAt → startRideAt),
   // which doesn't exist yet at quote/creation time — it's computed once the ride has
   // actually happened, via computeWaitingCharge() (see recalculateFare()).
   const waitingCharge = 0;
-  const surchargeFare = fare.surchargeEnabled ? fare.surchargeValue : 0;
+  const surchargeFare = Math.round(fare.surchargeEnabled ? fare.surchargeValue : 0);
 
-  const totalFare       = estimatedFare + waitingCharge + surchargeFare;
-  const adminCommission = (totalFare * fare.platformCommissionPercentage) / 100;
+  // Government tax (VAT/GST) — a percentage of the pre-tax fare, same treatment
+  // as surchargeFare: folded into totalFare, which commission is then computed on.
+  const preTaxFare    = estimatedFare + waitingCharge + surchargeFare;
+  const governmentTax = Math.round(fare.governmentTaxEnabled ? (preTaxFare * fare.governmentTaxPercentage) / 100 : 0);
+
+  const totalFare       = preTaxFare + governmentTax;
+  const adminCommission = Math.round((totalFare * fare.platformCommissionPercentage) / 100);
   const driverEarning   = totalFare - adminCommission;
 
   return {
-    baseFare:        Math.round(baseFare),
-    bookingFee:      Math.round(bookingFee),
-    distanceFare:    Math.round(distanceFare),
-    waitingCharge:   Math.round(waitingCharge),
-    surchargeFare:   Math.round(surchargeFare),
-    subtotalFare:    Math.round(subtotalFare),
-    estimatedFare:   Math.round(estimatedFare),
-    totalFare:       Math.round(totalFare),
-    adminCommission: Math.round(adminCommission),
-    driverEarning:   Math.round(driverEarning),
+    baseFare,
+    bookingFee,
+    distanceFare,
+    waitingCharge,
+    surchargeFare,
+    governmentTax,
+    subtotalFare,
+    estimatedFare,
+    totalFare,
+    adminCommission,
+    driverEarning,
   };
 };
 
@@ -156,6 +169,7 @@ export const buildFareBreakdown = (ride: {
   distanceFare:    number;
   waitingCharge:   number;
   surchargeFare:   number;
+  governmentTax:   number;
   subtotalFare:    number;
   promoDiscount:   number;
   tip:             number;
@@ -168,6 +182,7 @@ export const buildFareBreakdown = (ride: {
   distanceFare:    ride.distanceFare,
   waitingCharge:   ride.waitingCharge,
   surchargeFare:   ride.surchargeFare,
+  governmentTax:   ride.governmentTax,
   subtotalFare:    ride.subtotalFare,
   promoDiscount:   ride.promoDiscount,
   tip:             ride.tip,

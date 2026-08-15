@@ -3,6 +3,8 @@ import { MessageSenderRole } from '@prisma/client';
 import httpStatus from 'http-status';
 import AppError from '../../error/AppError';
 import prisma from '../../config/prisma';
+import { sendNotificationByFcmToken } from '../../utils/sentNotificationByFcmToken';
+import { logger } from '../../utils/logger';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -52,7 +54,7 @@ const sendMessage = async (payload: SendMessagePayload) => {
     receiverId = ride.passengerId;
   }
 
-  return prisma.message.create({
+  const saved = await prisma.message.create({
     data: {
       rideId:     payload.rideId,
       senderId:   payload.senderId,
@@ -62,6 +64,19 @@ const sendMessage = async (payload: SendMessagePayload) => {
     },
     include: { sender: { select: { name: true, profileImage: true } } },
   });
+
+  const senderName = saved.sender?.name ?? (payload.senderRole === 'driver' ? 'Your driver' : 'Your passenger');
+  const notificationBody = payload.message.length > 100
+    ? `${payload.message.slice(0, 100)}...`
+    : payload.message;
+
+  sendNotificationByFcmToken(
+    receiverId,
+    notificationBody,
+    `New message from ${senderName}`,
+  ).catch((err) => logger.warn('sendMessage: FCM to receiver failed:', err));
+
+  return saved;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

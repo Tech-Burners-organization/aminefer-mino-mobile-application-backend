@@ -27,6 +27,8 @@ const fareFixture = {
   waitingChargeRate: 0.5,
   surchargeEnabled: false,
   surchargeValue: 0,
+  governmentTaxEnabled: false,
+  governmentTaxPercentage: 0,
   platformCommissionPercentage: 20,
   isActive: true,
   isDeleted: false,

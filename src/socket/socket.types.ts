@@ -80,6 +80,10 @@ export const SocketEvents = {
   SEND_MESSAGE:     'send_message',      // client → server
   MESSAGE_RECEIVED: 'message_received',  // server → client
 
+  // ── Notifications ────────────────────────────────────────────────────────
+  READ_NOTIFICATION: 'readNotification', // client → server
+  NOTIFICATION:       'notification',    // server → client
+
   // ── System / housekeeping ────────────────────────────────────────────────
   ONLINE_USERS: 'onlineUser',
   USER_CONNECTED: 'userConnected', // legacy manual registration

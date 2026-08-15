@@ -201,13 +201,14 @@ export const recalculateFare = async (params: {
   driverEarning:   number;
   waitingTime:     number;
   waitingCharge:   number;
+  governmentTax:   number;
 }> => {
 
   const fare      = await getActiveFare(params.country);
   const breakdown = computeFareBreakdown(fare, params.vehicleCategory, params.actualDistanceKm);
   const { waitingTime, waitingCharge } = computeWaitingCharge(fare, params.arrivedPickupAt, params.startRideAt);
 
-  const totalFare       = Math.max(0, breakdown.totalFare + waitingCharge - params.promoDiscount);
+  const totalFare       = Math.max(0, Math.round(breakdown.totalFare + waitingCharge - params.promoDiscount));
   const adminCommission = Math.round((totalFare * fare.platformCommissionPercentage) / 100);
   const driverEarning   = totalFare - adminCommission;
 
@@ -218,5 +219,6 @@ export const recalculateFare = async (params: {
     driverEarning,
     waitingTime,
     waitingCharge,
+    governmentTax: breakdown.governmentTax,
   };
 };
