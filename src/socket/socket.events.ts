@@ -308,7 +308,7 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
           select: { isOnline: true, currentLat: true, currentLng: true, vehicleType: true },
         });
 
-        registerUser({ socketId: socket.id, userId, role, driverProfileId, vehicleType: updated.vehicleType });
+        registerUser({ socketId: socket.id, userId, role, driverProfileId, vehicleType: updated.vehicleType ?? undefined });
         updateDriverLocation(driverProfileId, [data.lng, data.lat]);
 
         socket.emit(SocketEvents.DRIVER_STATUS_UPDATED, {

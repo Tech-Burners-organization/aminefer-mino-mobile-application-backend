@@ -49,15 +49,18 @@ const updateMyProfile = catchAsync(async (req: Request, res: Response) => {
   
   if (req.files && Object.keys(req.files).length > 0) {
     const files = req.files as { [fieldName: string]: Express.Multer.File[] };
-    const uploadedFiles = storeFiles('profile', files);
+    const uploadedFiles = storeFiles('ride', files);
 
     // Profile image (all roles)
     if (uploadedFiles.image) payload.profileImage = uploadedFiles.image[0];
 
     // Driver-specific uploads
     if (uploadedFiles.license) payload.licenseImage = uploadedFiles.license[0];
+    if (uploadedFiles.licenseBack) payload.licenseBackImage = uploadedFiles.licenseBack[0];
+    if (uploadedFiles.backgroundCheck) payload.backgroundCheckImage = uploadedFiles.backgroundCheck[0];
     if (uploadedFiles.registration) payload.registrationImage = uploadedFiles.registration[0];
     if (uploadedFiles.certificate) payload.roadworthinessCertificate = uploadedFiles.certificate[0];
+    if (uploadedFiles.vehicleInspection) payload.vehicleInspectionImage = uploadedFiles.vehicleInspection[0];
     if (uploadedFiles.vehicle) payload.vehicleImages = uploadedFiles.vehicle;
 
     

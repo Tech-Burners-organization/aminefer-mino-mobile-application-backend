@@ -79,9 +79,12 @@ userRoutes
     upload.fields([
       { name: 'image', maxCount: 1 },
       { name: 'license', maxCount: 1 },
-      { name: 'vehicle', maxCount: 5 },
+      { name: 'licenseBack', maxCount: 1},
+      { name: 'vehicle', maxCount: 10 },
+      { name: 'backgroundCheck', maxCount: 1},
       { name: 'registration', maxCount: 1 },
       { name: 'certificate', maxCount: 1 },
+      { name: 'vehicleInspection', maxCount: 1},
     ]),
     parseData(),
     userController.updateMyProfile,

@@ -188,8 +188,9 @@ const getUserByEmailWithPassword = async (email: string) => {
 
 // Fields that live on DriverProfile, not User
 const DRIVER_PROFILE_FIELDS = new Set([
-  'licenseNumber', 'licenseExpiryDate', 'licenseImage', 'socialSecurityNumber',
-  'vehicleBrand', 'vehicleModel', 'vehicleColor', 'vehicleType', 'vehicleImages',
+  'licenseNumber', 'licenseExpiryDate', 'licenseImage', 'licenseBackImage', 'socialSecurityNumber',
+  'backgroundCheckImage',
+  'vehicleBrand', 'vehicleModel', 'vehicleColor', 'vehicleType', 'vehicleImages', 'vehicleInspectionImage',
   'registrationImage', 'roadworthinessCertificate',
 ]);
 

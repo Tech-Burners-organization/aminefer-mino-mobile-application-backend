@@ -374,13 +374,16 @@ model DriverProfile {
   licenseNumber             String
   licenseExpiryDate         DateTime
   licenseImage              String
+  licenseBackImage          String?
   socialSecurityNumber      String?
+  backgroundCheckImage      String?
 
   vehicleBrand              String
   vehicleModel              String
   vehicleColor              String
-  vehicleType               VehicleType
+  vehicleType               VehicleType?
   vehicleImages             String[]       @default([])
+  vehicleInspectionImage    String?
 
   registrationImage         String
   roadworthinessCertificate String?
@@ -461,6 +464,7 @@ model Ride {
   distanceFare  Float @default(0)
   waitingCharge Float @default(0)
   surchargeFare Float @default(0)
+  governmentTax Float @default(0)
   subtotalFare  Float @default(0)
 
   estimatedFare Float @default(0)
@@ -620,6 +624,10 @@ model Fare {
   // Surcharge config
   surchargeEnabled Boolean @default(false)
   surchargeValue   Float   @default(0)
+
+  // Government tax (VAT/GST) config
+  governmentTaxEnabled    Boolean @default(false)
+  governmentTaxPercentage Float   @default(0)
 
   platformCommissionPercentage Float
 
