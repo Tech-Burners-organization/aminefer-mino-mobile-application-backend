@@ -120,6 +120,7 @@ userRoutes
   .patch(
     '/approve-driver/:id',
     auth(USER_ROLE.ADMIN),
+    validateRequest(userValidation.approveDriverSchema),
     userController.approveDriver,
   )
 
@@ -127,6 +128,25 @@ userRoutes
     '/reject-driver/:id',
     auth(USER_ROLE.ADMIN),
     userController.rejectDriver,
+  )
+
+  // ── Driver document update review ───────────────────────────────────────────
+  .get(
+    '/driver-document-requests',
+    auth(USER_ROLE.ADMIN),
+    userController.getDriverDocumentUpdateRequests,
+  )
+
+  .patch(
+    '/driver-document-requests/:id/approve',
+    auth(USER_ROLE.ADMIN),
+    userController.approveDriverDocumentUpdate,
+  )
+
+  .patch(
+    '/driver-document-requests/:id/reject',
+    auth(USER_ROLE.ADMIN),
+    userController.rejectDriverDocumentUpdate,
   )
 
   .patch(

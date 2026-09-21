@@ -305,10 +305,10 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
         const updated = await prisma.driverProfile.update({
           where: { id: driverProfileId },
           data:  { isOnline: true, currentLat: data.lat, currentLng: data.lng },
-          select: { isOnline: true, currentLat: true, currentLng: true, vehicleType: true },
+          select: { isOnline: true, currentLat: true, currentLng: true, vehicleTypes: true },
         });
 
-        registerUser({ socketId: socket.id, userId, role, driverProfileId, vehicleType: updated.vehicleType ?? undefined });
+        registerUser({ socketId: socket.id, userId, role, driverProfileId, vehicleTypes: updated.vehicleTypes });
         updateDriverLocation(driverProfileId, [data.lng, data.lat]);
 
         socket.emit(SocketEvents.DRIVER_STATUS_UPDATED, {

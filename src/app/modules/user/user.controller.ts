@@ -38,7 +38,7 @@ const userCreateVarification = catchAsync(async (req, res) => {
 
 
 const updateMyProfile = catchAsync(async (req: Request, res: Response) => {
-  console.log("update my profile =>>>> ", req.user)
+
   const {userId, role } = req.user;
 
 
@@ -265,10 +265,11 @@ const deletedUserById = catchAsync(async (req: Request, res: Response) => {
 
 const approveDriver = catchAsync(async (req: Request, res: Response) => {
   const { id } = req.params;
+  const { vehicleTypes } = req.body;
 
-  console.log("req params =>>> ", id)
+  console.log({vehicleTypes})
 
-  const result = await userService.verifyDriverUserById(id);
+  const result = await userService.verifyDriverUserById(id, vehicleTypes);
   sendResponse(res, {
     statusCode: httpStatus.OK,
     success: true,
@@ -286,6 +287,46 @@ const rejectDriver = catchAsync(async (req: Request, res: Response) => {
     statusCode: httpStatus.OK,
     success: true,
     message: 'Driver rejected successfully',
+    data: result,
+  });
+});
+
+// ── Driver document update review (admin) ────────────────────────────────────
+
+const getDriverDocumentUpdateRequests = catchAsync(async (req: Request, res: Response) => {
+  const result = await userService.getDriverDocumentUpdateRequests(req.query);
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: 'Document update requests fetched successfully',
+    data: result.result,
+    meta: result.meta,
+  });
+});
+
+const approveDriverDocumentUpdate = catchAsync(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { userId } = req.user;
+
+  const result = await userService.approveDriverDocumentUpdate(id, userId);
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: 'Document update approved and applied to profile',
+    data: result,
+  });
+});
+
+const rejectDriverDocumentUpdate = catchAsync(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { userId } = req.user;
+  const { reason } = req.body;
+
+  const result = await userService.rejectDriverDocumentUpdate(id, userId, reason);
+  sendResponse(res, {
+    statusCode: httpStatus.OK,
+    success: true,
+    message: 'Document update rejected',
     data: result,
   });
 });
@@ -389,6 +430,9 @@ export const userController = {
   getAllRequestDrivers,
   approveDriver,
   rejectDriver,
+  getDriverDocumentUpdateRequests,
+  approveDriverDocumentUpdate,
+  rejectDriverDocumentUpdate,
   warnUser,
   banUser,
   unbanUser,

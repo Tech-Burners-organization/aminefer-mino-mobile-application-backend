@@ -224,6 +224,12 @@ enum PaymentCardType {
   WALLET
 }
 
+enum DocumentReviewStatus {
+  pending
+  verified
+  rejected
+}
+
 // ============================================================
 // USER
 // ============================================================
@@ -381,7 +387,9 @@ model DriverProfile {
   vehicleBrand              String
   vehicleModel              String
   vehicleColor              String
-  vehicleType               VehicleType?
+  // Multiple vehicle types: assigned by admin during driver verification
+  // (see UserService.verifyDriverUserById). Not driver-editable.
+  vehicleTypes              VehicleType[]  @default([])
   vehicleImages             String[]       @default([])
   vehicleInspectionImage    String?
 
@@ -398,6 +406,11 @@ model DriverProfile {
   approvalStatus            ApprovalStatus @default(pending)
   rejectionReason           String?
 
+  // Set while a document update submitted after initial verification is
+  // awaiting admin review (see DriverDocumentUpdateRequest). The live fields
+  // above are left untouched until that review is approved.
+  hasPendingDocumentUpdate  Boolean        @default(false)
+
   isOnline                  Boolean        @default(false)
   isOnRide                  Boolean        @default(false)
 
@@ -413,11 +426,43 @@ model DriverProfile {
   user                      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
   rides                     Ride[]         @relation("DriverRides")
   paymentsAsDriver          Payment[]      @relation("PaymentDriver")
+  documentUpdateRequests    DriverDocumentUpdateRequest[]
 
   @@index([approvalStatus])
   @@index([country])
   @@index([isOnline])
   @@map("driver_profiles")
+}
+
+// ============================================================
+// DRIVER DOCUMENT UPDATE REQUEST
+// ============================================================
+// A driver's document/vehicle-field changes submitted AFTER their profile is
+// already verified. Held here for admin review instead of writing straight
+// onto DriverProfile — the live profile only changes once approved.
+
+model DriverDocumentUpdateRequest {
+  id              String               @id @default(uuid())
+  driverProfileId String
+
+  // Proposed field -> new value map (only the fields the driver actually
+  // touched in this submission). Applied onto DriverProfile verbatim on approval.
+  changes         Json
+
+  status          DocumentReviewStatus @default(pending)
+  rejectionReason String?
+
+  reviewedById    String?
+  reviewedAt      DateTime?
+
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  driverProfile   DriverProfile        @relation(fields: [driverProfileId], references: [id], onDelete: Cascade)
+
+  @@index([driverProfileId])
+  @@index([status])
+  @@map("driver_document_update_requests")
 }
 
 // ============================================================

@@ -70,8 +70,17 @@ const updateEmergencyContactSchema = z.object({
   }),
 });
 
+const approveDriverSchema = z.object({
+  body: z.object({
+    vehicleTypes: z
+      .array(z.enum(['MINO_GO', 'MINO_COMFORT', 'MINO_XL', 'MINO_MOTO']))
+      .min(1, { message: 'Select at least one vehicle type' }),
+  }),
+});
+
 export const userValidation = {
   userValidationSchema,
   addEmergencyContactSchema,
   updateEmergencyContactSchema,
+  approveDriverSchema,
 };

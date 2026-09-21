@@ -65,7 +65,7 @@ const getAveragePickupDistanceKm = async (
 
   const candidates = await prisma.driverProfile.findMany({
     where: {
-      vehicleType,
+      vehicleTypes:   { has: vehicleType },
       isOnline:       true,
       isOnRide:       false,
       approvalStatus: 'verified',

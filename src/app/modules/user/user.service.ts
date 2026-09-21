@@ -3,7 +3,7 @@ import bcrypt from 'bcrypt';
 import httpStatus from 'http-status';
 import fs from 'fs';
 import path from 'path';
-import { AdminVerifiedStatus, Prisma, UserRole, UserStatus } from '@prisma/client';
+import { AdminVerifiedStatus, DocumentReviewStatus, Prisma, UserRole, UserStatus, VehicleType } from '@prisma/client';
 
 import prisma from '../../config/prisma';
 import AppError from '../../error/AppError';
@@ -112,6 +112,7 @@ const otpVerifyAndCreateUser = async ({ otp, token }: OTPVerifyAndCreateUserProp
 
   const { name, email, password, role, countryCode, phoneNumber, country, gender, dateOfBirth, acceptTerms, driverType, homeAddress } = decodeData as TUserCreate;
 
+
   const isOtpMatch = await otpServices.otpMatch(email, 'email-verification', otp);
   if (!isOtpMatch) throw new AppError(httpStatus.BAD_REQUEST, 'OTP did not match');
 
@@ -186,11 +187,13 @@ const getUserByEmailWithPassword = async (email: string) => {
   return prisma.user.findUnique({ where: { email, isDeleted: false } });
 };
 
-// Fields that live on DriverProfile, not User
+// Fields that live on DriverProfile, not User.
+// NOTE: vehicleTypes is intentionally excluded — it's admin-assigned only,
+// during driver verification (see verifyDriverUserById), never driver-editable.
 const DRIVER_PROFILE_FIELDS = new Set([
   'licenseNumber', 'licenseExpiryDate', 'licenseImage', 'licenseBackImage', 'socialSecurityNumber',
   'backgroundCheckImage',
-  'vehicleBrand', 'vehicleModel', 'vehicleColor', 'vehicleType', 'vehicleImages', 'vehicleInspectionImage',
+  'vehicleBrand', 'vehicleModel', 'vehicleColor', 'vehicleImages', 'vehicleInspectionImage',
   'registrationImage', 'roadworthinessCertificate',
 ]);
 
@@ -256,6 +259,54 @@ const updateMyProfile = async (userId: string, payload: TUserUpdate) => {
 
   // If driver, update user + upsert driver profile in one transaction
   if (user.role === USER_ROLE.DRIVER) {
+    const existingDriverProfile = await prisma.driverProfile.findUnique({ where: { userId } });
+    const hasDriverFieldChanges = Object.keys(driverFields).length > 0;
+
+    // Already-verified driver touching document/vehicle fields — stage for
+    // admin review instead of overwriting the live, approved profile.
+    if (existingDriverProfile?.approvalStatus === 'verified' && hasDriverFieldChanges) {
+      const pendingRequest = await prisma.driverDocumentUpdateRequest.findFirst({
+        where: { driverProfileId: existingDriverProfile.id, status: DocumentReviewStatus.pending },
+      });
+      if (pendingRequest) {
+        throw new AppError(
+          httpStatus.CONFLICT,
+          'You already have a document update pending admin review. Please wait for it to be reviewed before submitting another.',
+        );
+      }
+
+      const [updatedUser] = await prisma.$transaction([
+        prisma.user.update({ where: { id: userId }, data: userFields as any }),
+        prisma.driverProfile.update({
+          where: { id: existingDriverProfile.id },
+          data:  { hasPendingDocumentUpdate: true },
+        }),
+        prisma.driverDocumentUpdateRequest.create({
+          data: {
+            driverProfileId: existingDriverProfile.id,
+            changes:         driverFields as Prisma.InputJsonValue,
+          },
+        }),
+      ]);
+
+      process.nextTick(() => {
+        emitNotification({
+          userId:     userId,
+          receiverId: getAdminId() as string,
+          message:    { fullName: user.name ?? 'Driver', image: user.profileImage, text: `${user.name ?? 'A driver'} submitted document updates for review.`, photos: [] },
+          type:       'adminApprovalUpdate',
+        }).catch(console.error);
+      });
+
+      return {
+        user: updatedUser,
+        driver: existingDriverProfile,
+        documentUpdatePending: true,
+        accessToken: buildAccessToken(updatedUser),
+      }; 
+    }
+
+    // First-time submission, or not yet verified — apply directly (existing behavior).
     const [, driverProfile] = await prisma.$transaction([
       prisma.user.update({ where: { id: userId }, data: userFields as any }),
       prisma.driverProfile.upsert({
@@ -265,7 +316,7 @@ const updateMyProfile = async (userId: string, payload: TUserUpdate) => {
           driverType:  user.driverType ?? 'car',
           licenseNumber: '', licenseExpiryDate: new Date(), licenseImage: '',
           vehicleBrand: '', vehicleModel: '', vehicleColor: '',
-          vehicleType: 'MINO_GO', registrationImage: '',
+          registrationImage: '',
           ...driverFields,
         },
         update: driverFields,
@@ -322,9 +373,14 @@ const updateUser = async (userId: string, payload: TUserUpdate) => {
 
 // ── Admin actions ─────────────────────────────────────────────────────────────
 
-const verifyDriverUserById = async (userId: string) => {
+const verifyDriverUserById = async (userId: string, vehicleTypes: VehicleType[]) => {
 
-  console.log("userId => ", userId)
+  console.log("verify driver " , {userId, vehicleTypes} )
+
+  if (!vehicleTypes || vehicleTypes.length === 0) {
+    throw new AppError(httpStatus.BAD_REQUEST, 'Select at least one vehicle type to verify this driver');
+  }
+
   const user = await prisma.user.update({
     where: { id: userId },
     data: { adminVerified: AdminVerifiedStatus.verified },
@@ -333,7 +389,7 @@ const verifyDriverUserById = async (userId: string) => {
 
   await prisma.driverProfile.updateMany({
     where: { userId },
-    data: { approvalStatus: 'verified' },
+    data: { approvalStatus: 'verified', vehicleTypes },
   });
 
   process.nextTick(() => {
@@ -388,6 +444,130 @@ const declineDriverUserById = async (userId: string, reason?: string) => {
   });
 
   return user;
+};
+
+// ── Driver document update review (admin) ────────────────────────────────────
+// A verified driver's document/vehicle-field edits land in
+// DriverDocumentUpdateRequest instead of DriverProfile directly (see
+// updateMyProfile). These three functions drive the admin review queue.
+
+const getDriverDocumentUpdateRequests = async (query: PaginateQuery) => {
+  const { skip, take, page, limit } = buildPagination(query);
+  const status = (query.status as DocumentReviewStatus | undefined) ?? DocumentReviewStatus.pending;
+
+  const where: Prisma.DriverDocumentUpdateRequestWhereInput = { status };
+
+  const [result, total] = await prisma.$transaction([
+    prisma.driverDocumentUpdateRequest.findMany({
+      where,
+      skip,
+      take,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        driverProfile: {
+          include: {
+            user: { select: { id: true, name: true, email: true, phoneNumber: true, profileImage: true } },
+          },
+        },
+      },
+    }),
+    prisma.driverDocumentUpdateRequest.count({ where }),
+  ]);
+
+  return { meta: { page, limit, total, totalPage: Math.ceil(total / limit) }, result };
+};
+
+const approveDriverDocumentUpdate = async (requestId: string, adminId: string) => {
+  const request = await prisma.driverDocumentUpdateRequest.findUnique({
+    where:   { id: requestId },
+    include: { driverProfile: { include: { user: true } } },
+  });
+  if (!request) throw new AppError(httpStatus.NOT_FOUND, 'Document update request not found');
+  if (request.status !== DocumentReviewStatus.pending) {
+    throw new AppError(httpStatus.BAD_REQUEST, `This request has already been ${request.status}`);
+  }
+
+  const changes = request.changes as Prisma.DriverProfileUpdateInput;
+
+  const [, driverProfile] = await prisma.$transaction([
+    prisma.driverDocumentUpdateRequest.update({
+      where: { id: requestId },
+      data:  { status: DocumentReviewStatus.verified, reviewedById: adminId, reviewedAt: new Date() },
+    }),
+    prisma.driverProfile.update({
+      where: { id: request.driverProfileId },
+      data:  { ...changes, hasPendingDocumentUpdate: false },
+    }),
+  ]);
+
+  const driverUser = request.driverProfile.user;
+
+  process.nextTick(() => {
+    emitNotification({
+      userId:     adminId,
+      receiverId: driverUser.id,
+      message:    { fullName: 'Admin', image: '', text: 'Your updated documents have been verified and applied to your profile.', photos: [] },
+      type:       'driverVerified',
+    }).catch(console.error);
+
+    if (driverUser.email) {
+      sendNotificationEmail({
+        sentTo:      driverUser.email,
+        subject:     'Your document update has been approved',
+        userName:    driverUser.name || 'Driver',
+        messageText: 'Your updated documents have been reviewed and verified. The changes are now live on your profile.',
+      }).catch(console.error);
+    }
+  });
+
+  return driverProfile;
+};
+
+const rejectDriverDocumentUpdate = async (requestId: string, adminId: string, reason?: string) => {
+  const request = await prisma.driverDocumentUpdateRequest.findUnique({
+    where:   { id: requestId },
+    include: { driverProfile: { include: { user: true } } },
+  });
+  if (!request) throw new AppError(httpStatus.NOT_FOUND, 'Document update request not found');
+  if (request.status !== DocumentReviewStatus.pending) {
+    throw new AppError(httpStatus.BAD_REQUEST, `This request has already been ${request.status}`);
+  }
+
+  const [updatedRequest] = await prisma.$transaction([
+    prisma.driverDocumentUpdateRequest.update({
+      where: { id: requestId },
+      data:  { status: DocumentReviewStatus.rejected, rejectionReason: reason ?? null, reviewedById: adminId, reviewedAt: new Date() },
+    }),
+    prisma.driverProfile.update({
+      where: { id: request.driverProfileId },
+      data:  { hasPendingDocumentUpdate: false },
+    }),
+  ]);
+
+  const driverUser = request.driverProfile.user;
+  const text = reason
+    ? `Your document update was declined. Reason: ${reason}. Please re-upload the required documents.`
+    : 'Your document update was declined. Please re-upload the required documents.';
+
+  process.nextTick(() => {
+    emitNotification({
+      userId:     adminId,
+      receiverId: driverUser.id,
+      message:    { fullName: 'Admin', image: '', text, photos: [] },
+      type:       'adminApprovalUpdate',
+    }).catch(console.error);
+
+    if (driverUser.email) {
+      sendNotificationEmail({
+        sentTo:      driverUser.email,
+        subject:     'Your document update was declined',
+        userName:    driverUser.name || 'Driver',
+        messageText: text,
+      }).catch(console.error);
+    }
+  });
+
+  return updatedRequest;
 };
 
 const warnUser = async (targetUserId: string, adminId: string, reason: string) => {
@@ -650,6 +830,9 @@ export const userService = {
   getUserByEmailWithPassword,
   updateUser,
   declineDriverUserById,
+  getDriverDocumentUpdateRequests,
+  approveDriverDocumentUpdate,
+  rejectDriverDocumentUpdate,
   deleteMyAccount,
   blockedUser,
   getAllUserQuery,

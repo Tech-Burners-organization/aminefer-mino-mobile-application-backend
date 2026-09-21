@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { Server as SocketIOServer } from 'socket.io';
+import { VehicleType } from '@prisma/client';
 import prisma from '../app/config/prisma';
 import { logger } from '../app/utils/logger';
 import { getDistanceKm } from '../app/modules/ride/ride.utils';
@@ -43,7 +44,7 @@ export function registerUser(user: {
   userId:          string;
   role:            string;
   driverProfileId?: string;
-  vehicleType?:    string;
+  vehicleTypes?:   string[];
 }): void {
   const base: IOnlineUserEntry = {
     socketId:    user.socketId,
@@ -58,7 +59,7 @@ export function registerUser(user: {
     onlineDrivers.set(user.driverProfileId, {
       ...base,
       driverProfileId: user.driverProfileId,
-      vehicleType:     user.vehicleType,
+      vehicleTypes:    user.vehicleTypes,
       isOnRide:        false,
     });
   }
@@ -210,8 +211,10 @@ export async function broadcastRideRequestToNearbyDrivers(
       isOnRide:       false,
       approvalStatus: 'verified',
       driverType:     basePayload.vehicleCategory === 'MINO_MOTO' ? 'motorcycle' : 'car',
+      // Only notify drivers admin has actually assigned this vehicle category to.
+      vehicleTypes:   { has: basePayload.vehicleCategory as VehicleType },
     },
-    select: { id: true, vehicleType: true },
+    select: { id: true },
   });
 
   console.log("nearby drivers =>>>>> ", nearbyDrivers)
@@ -232,7 +235,7 @@ export async function broadcastRideRequestToNearbyDrivers(
       );
     }
 
-    const speed               = VEHICLE_SPEED_KMH[driver.vehicleType as string] ?? 40;
+    const speed               = VEHICLE_SPEED_KMH[basePayload.vehicleCategory] ?? 40;
     const estimatedArrivalMin = Math.ceil((distanceToPickupKm / speed) * 60);
 
 

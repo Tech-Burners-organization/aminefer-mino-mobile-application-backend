@@ -156,6 +156,9 @@ const createRide = async (payload: any) => {
           isOnRide:       false,
           approvalStatus: 'verified',
           driverType:     payload.vehicleCategory === 'MINO_MOTO' ? 'motorcycle' : 'car',
+          // Only count drivers admin has actually assigned this vehicle category to —
+          // keeps this pre-check consistent with broadcastRideRequestToNearbyDrivers().
+          vehicleTypes:   { has: payload.vehicleCategory },
         },
         select: { id: true },
       });
@@ -499,7 +502,7 @@ const driverAcceptRide = async (
       const driverDoc = await prisma.driverProfile.findUnique({
         where:   { id: driverId },
         select: {
-          vehicleBrand: true, vehicleModel: true, vehicleType: true,
+          vehicleBrand: true, vehicleModel: true, vehicleTypes: true,
           licenseNumber: true, currentLat: true, currentLng: true,
           averageRating: true, totalTrips: true, createdAt: true,
           user: { select: { name: true, profileImage: true, averageRating: true, phoneNumber: true, countryCode: true } },
@@ -528,7 +531,8 @@ const driverAcceptRide = async (
         ?? driverDoc?.currentLng ?? 0;
 
       const distanceToPickupKm  = getDistanceKm(ride.pickupLat ?? 0, ride.pickupLng ?? 0, driverLat, driverLng);
-      const speed               = AVERAGE_SPEED_KMH[driverDoc?.vehicleType ?? ''] ?? 40;
+      // Speed is for THIS ride's category, not the driver's full list of assigned types.
+      const speed               = AVERAGE_SPEED_KMH[ride.vehicleCategory] ?? 40;
       const estimatedArrivalMin = Math.ceil((distanceToPickupKm / speed) * 60);
 
       const payload = {
@@ -543,7 +547,8 @@ const driverAcceptRide = async (
         driverCountryCode:   driverDoc?.user?.countryCode       ?? '',
         vehicleBrand:        driverDoc?.vehicleBrand            ?? '',
         vehicleModel:        driverDoc?.vehicleModel            ?? '',
-        vehicleType:         driverDoc?.vehicleType             ?? '',
+        vehicleType:         ride.vehicleCategory                ?? '',
+        vehicleTypes:        driverDoc?.vehicleTypes            ?? [],
         licenseNumber:       driverDoc?.licenseNumber           ?? '',
         driverCurrentLocation: { lat: driverLat, lng: driverLng },
         pickupLocation:  { address: ride.pickupAddress,  lat: ride.pickupLat,  lng: ride.pickupLng  },
@@ -1300,7 +1305,7 @@ const confirmDropoff = async (rideId: string, driverId: string, deliveryProofIma
       const driverDoc = await prisma.driverProfile.findUnique({
         where:  { id: driverId },
         select: {
-          vehicleBrand: true, vehicleModel: true, vehicleType: true,
+          vehicleBrand: true, vehicleModel: true, vehicleTypes: true,
           licenseNumber: true, currentLat: true, currentLng: true,
           averageRating: true, totalTrips: true, createdAt: true,
           user: { select: { name: true, profileImage: true, averageRating: true, phoneNumber: true, countryCode: true } },
@@ -1371,7 +1376,8 @@ const confirmDropoff = async (rideId: string, driverId: string, deliveryProofIma
 
         vehicleBrand: driverDoc?.vehicleBrand ?? '',
         vehicleModel: driverDoc?.vehicleModel ?? '',
-        vehicleType: driverDoc?.vehicleType ?? '',
+        vehicleType: ride.vehicleCategory ?? '',
+        vehicleTypes: driverDoc?.vehicleTypes ?? [],
         licenseNumber: driverDoc?.licenseNumber ?? '',
 
         driverCurrentLocation: {

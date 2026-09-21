@@ -29,7 +29,7 @@ export interface IOnlineUserEntry {
 export interface IOnlineDriverEntry extends IOnlineUserEntry {
   driverProfileId: string;
   location?: [number, number]; // [lng, lat] — kept in-memory for quick lookups
-  vehicleType?: string;
+  vehicleTypes?: string[];
   isOnRide: boolean;
 }
 

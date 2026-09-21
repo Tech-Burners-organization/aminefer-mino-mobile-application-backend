@@ -75,7 +75,6 @@ const generateAndReturnTokens = async (user: User) => {
 
 const login = async (payload: TLogin, req: Request) => {
 
-  console.log("Login payload =>>> ", payload);
   
   const user = await prisma.user.findUnique({
     where: { email: payload.email },

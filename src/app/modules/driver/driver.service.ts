@@ -23,7 +23,7 @@ const toggleOnlineStatus = async (
     data:  isOnline
       ? { isOnline: true, currentLat: lat, currentLng: lng }
       : { isOnline: false },
-    select: { isOnline: true, currentLat: true, currentLng: true, vehicleType: true, approvalStatus: true },
+    select: { isOnline: true, currentLat: true, currentLng: true, vehicleTypes: true, approvalStatus: true },
   });
 };
 

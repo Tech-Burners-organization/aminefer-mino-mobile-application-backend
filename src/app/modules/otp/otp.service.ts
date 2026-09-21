@@ -75,18 +75,37 @@ const checkOtpByNumber = async (phone: string) => {
   return { isExist, isExpireOtp };
 };
 
+/**
+ * Verifies an OTP and returns its record. Throws a specific AppError for each
+ * failure so the client can tell the user what to do next:
+ *   - no OTP requested  → request one
+ *   - wrong code        → retry
+ *   - already used      → request a new one
+ *   - expired           → request a new one
+ */
 const otpMatch = async (email: string, purpose: string, otp: string) => {
-
-  return prisma.otp.findFirst({
-    where: {
-      sentTo:    email,
-      purpose:   mapPurpose(purpose),
-      otp,
-      status:    OtpStatus.pending,
-      expiredAt: { gt: new Date() },
-    },
+  const record = await prisma.otp.findFirst({
+    where:   { sentTo: email, purpose: mapPurpose(purpose) },
     orderBy: { createdAt: 'desc' },
   });
+
+  if (!record) {
+    throw new AppError(httpStatus.BAD_REQUEST, 'No verification code was requested for this account. Please request a new code.');
+  }
+
+  if (record.otp !== otp) {
+    throw new AppError(httpStatus.BAD_REQUEST, 'The verification code is incorrect. Please check the code and try again.');
+  }
+
+  if (record.status === OtpStatus.verified) {
+    throw new AppError(httpStatus.BAD_REQUEST, 'This verification code has already been used. Please request a new code.');
+  }
+
+  if (new Date(record.expiredAt) < new Date()) {
+    throw new AppError(httpStatus.BAD_REQUEST, 'Your verification code has expired. Please request a new code.');
+  }
+
+  return record;
 };
 
 const updateOtpByEmail = async (
