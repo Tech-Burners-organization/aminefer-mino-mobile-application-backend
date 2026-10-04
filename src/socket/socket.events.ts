@@ -133,6 +133,10 @@ export function registerSocketEvents(socket: Socket, _io: SocketIOServer): void 
     })
     .catch((err) => logger.error('Failed to fetch unread notification count on connect:', err));
 
+  // Send this user's unread message count for their current ride (if any) on connect
+  MessageService.emitActiveRideMessageCount(userId)
+    .catch((err) => logger.error('Failed to push unread message count on connect:', err));
+
   logger.info(`[CONNECT] ${name} (${role}) socket=${socket.id}`);
 
   // ── Legacy manual registration (backward compat) ──────────────────────────

@@ -79,6 +79,7 @@ export const SocketEvents = {
   // ── Chat ─────────────────────────────────────────────────────────────────
   SEND_MESSAGE:     'send_message',      // client → server
   MESSAGE_RECEIVED: 'message_received',  // server → client
+  MESSAGE_COUNT:    'message_count',     // server → client — unread count for a ride
 
   // ── Notifications ────────────────────────────────────────────────────────
   READ_NOTIFICATION: 'readNotification', // client → server

@@ -153,6 +153,23 @@ export function emitToRideRoom(rideId: string, event: string, data: unknown): vo
   _io?.to(rideRoom(rideId)).emit(event, data);
 }
 
+/**
+ * Emit to any connected user by their User ID, regardless of role (passenger
+ * or driver). Every socket joins its own passengerRoom(userId) on connect —
+ * this is that same delivery path under a role-agnostic name, for callers
+ * (like message unread counts) that don't know or care which role the
+ * recipient is.
+ */
+export function emitToUser(userId: string, event: string, data: unknown): boolean {
+  if (!_io) return false;
+  const room = passengerRoom(userId);
+  if (hasRoomSockets(room)) { _io.to(room).emit(event, data); return true; }
+  const entry = onlineUsers.get(userId);
+  if (entry) { _io.to(entry.socketId).emit(event, data); return true; }
+  logger.warn(`emitToUser: user ${userId} is offline`);
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function broadcastToNearbyDrivers(

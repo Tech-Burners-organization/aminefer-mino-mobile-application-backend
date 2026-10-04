@@ -5,6 +5,8 @@ import AppError from '../../error/AppError';
 import prisma from '../../config/prisma';
 import { sendNotificationByFcmToken } from '../../utils/sentNotificationByFcmToken';
 import { logger } from '../../utils/logger';
+import { emitToUser, isManagerReady } from '../../../socket/socket.manager';
+import { SocketEvents } from '../../../socket/socket.types';
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -76,6 +78,9 @@ const sendMessage = async (payload: SendMessagePayload) => {
     `New message from ${senderName}`,
   ).catch((err) => logger.warn('sendMessage: FCM to receiver failed:', err));
 
+  emitMessageCount(payload.rideId, receiverId)
+    .catch((err) => logger.warn('sendMessage: unread-count push failed:', err));
+
   return saved;
 };
 
@@ -108,6 +113,9 @@ const getRideMessages = async (rideId: string, requesterId: string) => {
     data:  { isRead: true },
   });
 
+  emitMessageCount(rideId, requesterId)
+    .catch((err) => logger.warn('getRideMessages: unread-count push failed:', err));
+
   const msgs = await prisma.message.findMany({
     where:   { rideId, isDeleted: false },
     orderBy: { createdAt: 'asc' },
@@ -131,9 +139,56 @@ const getUnreadCount = async (rideId: string, userId: string): Promise<number> =
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
+// emitMessageCount — pushes a user's current unread-message count for one
+// ride over their personal socket room. Fired after a new message arrives and
+// after the user reads a conversation, so both participants' badges stay
+// accurate without polling.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const emitMessageCount = async (rideId: string, userId: string): Promise<void> => {
+  if (!isManagerReady()) return;
+
+  const unreadCount = await getUnreadCount(rideId, userId);
+
+  emitToUser(userId, SocketEvents.MESSAGE_COUNT, {
+    rideId,
+    statusCode: 200,
+    success: true,
+    unreadCount,
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// emitActiveRideMessageCount — on socket connect, push the unread count for
+// whichever ride (if any) this user currently has open — instant vs. rides
+// completed/cancelled, matching the same window sendMessage() allows chat in.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const emitActiveRideMessageCount = async (userId: string): Promise<void> => {
+  const activeRide = await prisma.ride.findFirst({
+    where: {
+      isDeleted: false,
+      status:    { notIn: ['COMPLETED', 'CANCELLED'] },
+      OR: [
+        { passengerId: userId },
+        { driver: { userId } },
+      ],
+    },
+    orderBy: { createdAt: 'desc' },
+    select:  { id: true },
+  });
+
+  if (!activeRide) return;
+
+  await emitMessageCount(activeRide.id, userId);
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const MessageService = {
   sendMessage,
   getRideMessages,
+  emitMessageCount,
+  emitActiveRideMessageCount,
   getUnreadCount,
 };
